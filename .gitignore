@@ -1,0 +1,25 @@
+# Secrets & machine-specific config (Volc ASR keys live in android/local.properties)
+local.properties
+*.env
+
+# Gradle / Android build output
+.gradle/
+build/
+captures/
+.externalNativeBuild/
+.cxx/
+*.apk
+*.aab
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.DS_Store
+
+# Local permissions, recordings, and generated QA captures
+.claude/settings.local.json
+test-media/
+scripts/__pycache__/
+evidence/
+讨论/

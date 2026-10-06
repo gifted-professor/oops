@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <title>Oops</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">Oops</span>
+      <span class="tagline">Never miss what mattered.</span>
+    </div>
+    <button class="icon-btn" id="btn-settings" aria-label="调试设置">⚙︎</button>
+  </header>
+
+  <section class="status" aria-live="polite">
+    <div class="status-row">
+      <span class="pill" id="pill"><span class="dot"></span><span id="capture-text">未收音</span></span>
+      <span class="source" id="source-text"></span>
+      <div class="meter" aria-hidden="true"><div id="level"></div></div>
+    </div>
+    <div class="status-meta">
+      <span id="buffer-text">缓存 0:00 / 5:00</span>
+      <span class="asr" id="asr-text">识别未连接</span>
+    </div>
+    <div class="gap-banner" id="gap-banner" hidden></div>
+  </section>
+
+  <main class="transcript" id="transcript">
+    <p class="section-title">最近 5 分钟 · 默认临时，到期自动清除</p>
+    <div class="empty" id="empty">
+      开始收音后，最近 5 分钟的对话会出现在这里。<br>
+      重要的话不用提前标记，事后点 <b>Oops</b> 就能找回原话。
+    </div>
+    <div class="pruned-note" id="pruned-note" hidden>更早的内容已自动清除</div>
+    <ol id="lines"></ol>
+    <div class="partial" id="partial"></div>
+  </main>
+
+  <footer class="dock">
+    <button class="dock-btn" id="btn-capture">开始收音</button>
+    <button class="oops-btn" id="btn-oops" aria-label="Oops，找回刚才那句"><span>Oops</span><small>找回刚才那句</small></button>
+    <button class="dock-btn" id="btn-saved">已保存 <b id="saved-count">0</b></button>
+  </footer>
+
+  <div class="backdrop" id="backdrop" hidden></div>
+  <section class="sheet" id="sheet" hidden aria-live="polite"></section>
+  <div class="toast" id="toast" hidden></div>
+
+  <script src="bridge-mock.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

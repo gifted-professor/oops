@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.Oops" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/oops_bg</item>
+        <item name="android:colorAccent">@color/oops_brand</item>
+    </style>
+
+    <color name="oops_brand">#6E56F8</color>
+    <color name="oops_bg">#F7F6FB</color>
+</resources>

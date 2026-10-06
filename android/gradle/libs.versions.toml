@@ -1,0 +1,22 @@
+[versions]
+agp = "9.4.1"
+coreKtx = "1.19.1"
+activity = "1.13.0"
+webkit = "1.17.1"
+coroutines = "1.11.0"
+okhttp = "5.5.0"
+junit = "4.13.2"
+orgJson = "20260814"
+
+[libraries]
+androidx-core-ktx = { module = "androidx.core:core-ktx", version.ref = "coreKtx" }
+androidx-activity-ktx = { module = "androidx.activity:activity-ktx", version.ref = "activity" }
+androidx-webkit = { module = "androidx.webkit:webkit", version.ref = "webkit" }
+kotlinx-coroutines-android = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-android", version.ref = "coroutines" }
+kotlinx-coroutines-test = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-test", version.ref = "coroutines" }
+okhttp = { module = "com.squareup.okhttp3:okhttp", version.ref = "okhttp" }
+junit = { module = "junit:junit", version.ref = "junit" }
+org-json = { module = "org.json:json", version.ref = "orgJson" }
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }

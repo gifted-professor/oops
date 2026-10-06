@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Oops</string>
+    <string name="notif_channel_capture">收音状态</string>
+    <string name="notif_capture_title">Oops 正在收音</string>
+    <string name="notif_capture_text">只保留最近 5 分钟，确认后才会保存</string>
+    <string name="notif_action_recall">Oops 一下</string>
+    <string name="notif_action_stop">停止</string>
+</resources>
