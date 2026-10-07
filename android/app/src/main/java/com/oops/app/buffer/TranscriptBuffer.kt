@@ -26,6 +26,9 @@ data class Utterance(
     val tag: String? = null,
     val tagProb: Double? = null,
     val tagEngine: String? = null,
+    val speakerState: String? = null,
+    val speakerScore: Double? = null,
+    val speakerPreview: SpeakerPreview? = null,
 )
 
 /**
@@ -50,10 +53,14 @@ class TranscriptBuffer(private val retentionMs: Long) {
 
     /** Fills in who said it once the voiceprint lookup returns; null if the sentence already expired. */
     @Synchronized
-    fun setSpeaker(id: String, speaker: String?, segments: List<SpeakerSegment> = emptyList()): Utterance? {
+    fun setSpeaker(id: String, speaker: String?, segments: List<SpeakerSegment> = emptyList(),
+                   speakerState: String? = null, speakerScore: Double? = null,
+                   speakerPreview: SpeakerPreview? = null): Utterance? {
         val index = items.indexOfFirst { it.id == id }
         if (index < 0) return null
-        return items[index].copy(speaker = speaker, segments = segments).also { items[index] = it }
+        return items[index].copy(speaker = speaker, segments = segments,
+            speakerState = speakerState, speakerScore = speakerScore,
+            speakerPreview = speakerPreview).also { items[index] = it }
     }
 
     @Synchronized

@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#f8f6f0">
+  <title>Oops · 录入我的声纹</title>
+  <link rel="stylesheet" href="enroll.css">
+  <script src="audio.js" defer></script>
+  <script src="enroll.js" defer></script>
+</head>
+<body>
+<main>
+  <header><span class="brand">Oops<span class="dot">.</span></span><span class="tag">团队声纹录入</span></header>
+  <section class="intro"><p class="eyebrow">让会议认出你的声音</p><h1>你好，<span id="name">团队成员</span></h1>
+    <p>找个安静的地方，用平时说话的声音读完下面这段话。约 30 秒，读完可以再读一遍。</p></section>
+  <p id="status" role="status" aria-live="polite">正在读取录入邀请…</p>
+  <section class="card" id="flow" hidden>
+    <div class="section-head"><h2 id="script-title">第一步 · 朗读录入</h2><span id="duration">30 秒</span></div>
+    <p id="script" class="script"></p>
+    <div id="meter-wrap" hidden><div class="progress"><div id="progress"></div></div>
+      <div class="record-meta"><strong id="timer">00:00 / 00:30</strong><span id="level">等待麦克风声音</span></div></div>
+    <p id="quality" class="muted" hidden></p>
+    <label id="consent-wrap" class="consent"><input type="checkbox" id="consent"><span>我就是上述成员，同意上传本人单独朗读的声音，用于 Oops 声纹匹配。</span></label>
+    <div class="buttons"><button id="record" class="primary" disabled>开始朗读 · 30 秒</button>
+      <button id="stop" hidden>结束录音</button><button id="save" class="primary" hidden>保存我的声纹</button>
+      <button id="discard" hidden>放弃并重录</button><button id="test" hidden>读另一段话测试 · 10 秒</button></div>
+    <p id="profile" class="muted"></p>
+  </section>
+  <section id="result" class="card" hidden><h2>第二步 · 核对匹配结果</h2><p id="result-title" class="result-title"></p>
+    <p id="result-reason"></p><div id="scores"></div><p class="muted">相似度不是正确概率。如果结果不是本人，先换安静环境重录，再交给团队排查。请保持页面在前台，使用手机浏览器打开。</p></section>
+  <footer>仅保存声纹特征，不保存这段录音文件。保存会更新你的现有声纹。录音检查不能验证本人身份，也不能保证识别准确。链接仅供对应成员使用。</footer>
+</main>
+</body>
+</html>

@@ -32,6 +32,8 @@
     playingKey: null,
     latency: null,
     autoScroll: true,
+    voiceprintName: "",
+    voiceprintDelete: null,
   };
 
   // ---- helpers --------------------------------------------------------------------------
@@ -94,6 +96,7 @@
         }
         break;
       case 'state': setState(p); break;
+      case 'voiceprint.open': openSheet({kind: 'voiceprint'}); break;
       case 'insets': applyInsets(p); break;
       case 'asr.partial':
         $('partial').textContent = p.text ? `… ${p.text}` : '';
@@ -104,7 +107,7 @@
         $('partial').textContent = '';
         addLine(p);
         break;
-      case 'asr.speaker': setLineSpeaker(p.id, p.speaker, p.segments); break;
+      case 'asr.speaker': setLineSpeaker(p.id, p.speaker, p.segments, p.score, p.speakerState, p.speakerPreview); break;
       case 'asr.tag':
         if (S.records.has(p.id)) {
           S.records.set(p.id, { ...S.records.get(p.id), ...p });
@@ -150,7 +153,11 @@
   function setState(s) {
     // A new capture session starts an empty timeline; old lines and cards no longer apply.
     if (s.sessionId && s.sessionId !== S.state.sessionId) resetTranscript();
+    const previousVoiceprint = JSON.stringify(S.state.voiceprint);
+    const previousPreview = S.state.speakerPreviewEnabled;
     S.state = { ...S.state, ...s };
+    if (previousPreview !== S.state.speakerPreviewEnabled) S.records.forEach((_, id) => renderLine(id));
+    if (S.sheet?.kind === 'voiceprint' && previousVoiceprint !== JSON.stringify(S.state.voiceprint)) renderSheet();
     renderStatus();
   }
 
@@ -168,16 +175,25 @@
   function renderStatus() {
     const s = S.state;
     $('pill').classList.toggle('on', !!s.capturing);
-    $('capture-text').textContent = s.capturing ? '收音中' : '未收音';
+    $('capture-text').textContent = s.capturing ? (s.sourceReady ? '收音中' : '等待收音') : '未收音';
     const sourceLabel = SOURCE_TEXT[s.source] || s.source || '';
     // External sources report their link state (e.g. "Mac 收音：Wireless microphone").
     $('source-text').textContent = s.capturing && s.sourceDetail ? s.sourceDetail : sourceLabel;
     $('level').style.width = `${Math.round((s.capturing ? s.level : 0) * 100)}%`;
     $('buffer-text').textContent = `缓存 ${clock(s.bufferedMs)} / ${clock(s.retentionMs)}`;
-    const [text, cls] = ASR_TEXT[s.asr] || [s.asr, ''];
+    const [text, cls] = s.capturing && !s.sourceReady && !['error', 'unconfigured'].includes(s.asr)
+      ? ['等待音源', ''] : (ASR_TEXT[s.asr] || [s.asr, '']);
     const asr = $('asr-text');
     asr.textContent = text;
     asr.className = `asr ${cls}`;
+    const preview = $('speaker-preview-status');
+    preview.hidden = !s.speakerPreviewEnabled || !s.capturing;
+    preview.textContent = s.liveOverlap ? '疑似多人同时说话（试验检测）' :
+      s.liveSpeakerStatus === 'unsupported' ? '讲话人预览：服务器尚未开启' :
+      s.liveSpeakerStatus === 'error' ? '讲话人预览：请求失败' :
+      s.liveSpeakers?.length ? `讲话人预览（试验）：${s.liveSpeakers.join('、')}` :
+      s.liveSpeakerStatus === 'live' ? '讲话人预览：身份待确认' :
+      s.liveSpeakerStatus === 'silence' ? '讲话人预览：等待讲话' : '讲话人预览：分析中…';
 
     const banner = $('gap-banner');
     const gaps = s.asrGaps || [];
@@ -232,21 +248,35 @@
   }
 
   /** The voiceprint answer arrives after the caption; add or replace the name chip in place. */
-  function setLineSpeaker(id, speaker, segments = []) {
+  function setLineSpeaker(id, speaker, segments = [], score = null, state = null, preview = null) {
     const u = S.records.get(id);
     if (!u) return;
     u.speaker = speaker;
     u.segments = segments;
+    u.speakerScore = score;
+    u.speakerState = state;
+    u.speakerPreview = preview;
     renderLine(id);
   }
 
   const TAG_LABELS = { commitment: '承诺/指派', decision: '决定', idea: '想法', constraint: '约束', chitchat: '寒暄', uncertain: '待判断' };
+  function speakerStatusHtml(u) {
+    const text = {pending:'声纹识别中', unconfirmed:'声纹未确认', too_short:'语音太短',
+      busy:'声纹请求拥挤', audio_unavailable:'声纹音频不可用', unsupported:'声纹服务不可用', error:'声纹请求失败'}[u.speakerState];
+    if (!text) return '';
+    const score = u.speakerState === 'unconfirmed' && typeof u.speakerScore === 'number' && Number.isFinite(u.speakerScore)
+      ? ` · ${u.speakerScore.toFixed(2)}` : '';
+    return `<span class="spk spk-status">${text}${score}</span>`;
+  }
   function renderLine(id) {
     const u = S.records.get(id), li = S.lines.get(id);
     if (!u || !li) return;
     const speaker = speakerLabel(u.speaker);
-    const words = u.segments?.length ? u.segments.map((s) => `<span class="${s.approx ? 'approx-segment' : ''}"><span class="spk">${esc(speakerLabel(s.speaker) || '未知')}</span>${esc(s.text)}</span>`).join('') :
-      `${speaker ? `<span class="spk">${esc(speaker)}</span>` : ''}${esc(u.text)}`;
+    const experiment = S.state.speakerPreviewEnabled && u.speakerPreview?.experimental && u.speakerPreview.segments?.length;
+    const words = experiment ? `<span class="preview-note">说话人拆分试验${u.speakerPreview.jevUsed ? ' · Jev 辅助' : ''}</span>` +
+      u.speakerPreview.segments.map((s) => `<span class="preview-segment${s.kind === 'overlap' ? ' preview-overlap' : ''}"><span class="spk spk-status">${esc(s.kind === 'overlap' ? '疑似多人同时说话' : speakerLabel(s.speaker) || '身份待确认')}${s.source === 'voiceprint+context' ? ' · 待核对' : ''}</span>${esc(s.text)}</span>`).join('') :
+      u.segments?.length ? u.segments.map((s) => `<span class="${s.approx ? 'approx-segment' : ''}"><span class="spk">${esc(speakerLabel(s.speaker) || '未知')}</span>${esc(s.text)}</span>`).join('') :
+      `${speaker ? `<span class="spk">${esc(speaker)}</span>` : ''}${speakerStatusHtml(u)}${esc(u.text)}`;
     li.querySelector('div').innerHTML = `${words}${TAG_LABELS[u.tag] ? ` <span class="badge value-tag">${TAG_LABELS[u.tag]}</span>` : ''}`;
   }
 
@@ -292,6 +322,10 @@
   // ---- sheets -----------------------------------------------------------------------------
 
   function openSheet(sheet) {
+    if (S.sheet?.kind === 'voiceprint' && sheet.kind !== 'voiceprint') {
+      if (['saving', 'testing'].includes(S.state.voiceprint?.phase)) return toast('请等待当前请求结束');
+      send('voiceprint.cancel');
+    }
     S.sheet = sheet;
     renderSheet();
     $('sheet').hidden = false;
@@ -299,6 +333,10 @@
   }
 
   function closeSheet() {
+    if (S.sheet?.kind === 'voiceprint') {
+      if (['saving', 'testing'].includes(S.state.voiceprint?.phase)) return toast('请等待当前请求结束');
+      send('voiceprint.cancel');
+    }
     if (S.playingKey) send('clip.stop');
     S.sheet = null;
     $('sheet').hidden = true;
@@ -307,6 +345,7 @@
 
   function renderSheet() {
     const k = S.sheet?.kind;
+    $('sheet').dataset.kind = k || '';
     const html = {
       pending: () => spinnerHtml('正在回溯刚才的对话…', '按时间和语义定位原话'),
       draftPending: () => spinnerHtml('正在整理行动草稿…', '提取负责人、事项、截止时间和约束'),
@@ -315,6 +354,7 @@
       draft: draftHtml,
       result: resultHtml,
       settings: settingsHtml,
+      voiceprint: voiceprintHtml,
       saved: savedHtml,
       commitments: commitmentsHtml,
     }[k];
@@ -526,7 +566,9 @@
       : '还没有召回记录';
     return `<div class="grabber"></div>
       <div class="sheet-head"><span class="kicker">调试设置</span><button class="close" data-act="close" aria-label="关闭">✕</button></div>
-      <label class="field"><span>音源（下次开始收音时生效）</span>
+      <button class="btn primary" data-act="vp-open">声纹录入与匹配测试</button>
+      <p class="fine">由本人按提示朗读，录入后可以重新测试谁在说话。</p>
+      <label class="field"><span>音源（保存后立即切换，保留本场记录）</span>
         <select id="set-source">
           <option value="mic" ${s.source === 'mic' ? 'selected' : ''}>手机麦克风</option>
           <option value="wav" ${s.source === 'wav' ? 'selected' : ''}>测试 WAV（预录音频）</option>
@@ -537,7 +579,10 @@
       <div class="row"><button class="chip" data-act="pick-audio">选择测试 WAV</button><button class="chip ghost" data-act="reset-audio">恢复内置音频</button></div>
       <label class="switch"><span>使用 Mock 后端</span><input type="checkbox" id="set-mock" ${s.backend === 'mock' ? 'checked' : ''}></label>
       <label class="field"><span>后端地址</span><input id="set-url" inputmode="url" placeholder="http://192.168.1.10:8000" value="${esc(s.backendUrl || '')}"></label>
+      <label class="field"><span>服务访问凭据</span><input id="set-token" type="password" autocomplete="off" placeholder="${s.hasBackendToken ? '已配置；留空保留原凭据' : '远程服务提供的访问凭据'}"></label>
+      <label class="switch"><span>清除当前地址的访问凭据</span><input type="checkbox" id="set-clear-token"></label>
       <label class="switch"><span>说话人区分（实验：测试中会丢句）</span><input type="checkbox" id="set-spk" ${s.speakerInfo ? 'checked' : ''}></label>
+      <label class="switch"><span>实时换人拆分与重叠提示（试验）</span><input type="checkbox" id="set-preview" ${s.speakerPreviewEnabled ? 'checked' : ''}></label>
       <div class="actions two" style="margin-top:16px">
         <button class="btn ghost" data-act="close">取消</button>
         <button class="btn primary" data-act="apply-settings">保存</button>
@@ -546,6 +591,56 @@
       <p class="diag">${esc(latency)}</p>
       <p class="section-title" style="margin-top:12px">诊断</p>
       <p class="diag" id="diag">${esc(diagText())}</p>`;
+  }
+
+  const ENROLL_TEXT = '现在录入我的声纹，这段话只用于声音测试。早晨的阳光照进房间，窗外有人散步，远处传来汽车的声音。桌上放着一本书、一杯水和一支笔。我用平时说话的声音朗读，保持自然的语速和音量。读完后稍作停顿，再从头朗读一次。';
+  const TEST_TEXT = '午后的公园很安静，树叶随着微风轻轻摇动。小路旁有几朵花，远处的孩子正在玩耍。我现在用另一段文字测试声音匹配。';
+
+  function voiceprintHtml() {
+    const v = S.state.voiceprint || { phase: 'idle' };
+    const busy = ['loading', 'saving', 'testing', 'checking'].includes(v.phase);
+    const recording = v.phase === 'recording';
+    const name = v.name || S.voiceprintName;
+    const people = v.catalog?.people || [];
+    const limit = v.mode === 'test' ? 10 : 30;
+    const message = busy ? ({loading: '正在读取声纹列表…', saving: '正在检查并保存声纹…', testing: '正在比较四人的声纹…', checking: '正在检查录音质量…'})[v.phase] : v.message;
+    const results = v.diagnosis ? `<p class="section-title">这段测试录音的结果</p>
+      <p class="diag">${esc(v.diagnosis.speaker ? '当前判断：' + v.diagnosis.speaker : '当前判断：未知')}<br>
+      最接近：${esc(v.diagnosis.closest || '暂无声纹')} · 相似度 ${Number(v.diagnosis.score).toFixed(3)}<br>${esc(v.diagnosis.reason)}</p>
+      <div class="cands">${(v.diagnosis.scores || []).map(x => `<div class="cand"><span>${esc(x.name)}</span><span>${Number(x.score).toFixed(3)}</span></div>`).join('')}</div>
+      <p class="fine">当前门槛 ${v.diagnosis.accept}，领先幅度至少 ${v.diagnosis.required_margin}；相似度不是正确概率，请核对真实说话人。</p>` : '';
+    return `<div class="grabber"></div><div class="sheet-head"><span class="kicker">声纹录入与测试</span>
+      <button class="close" data-act="close" aria-label="关闭">✕</button></div>
+      <label class="field"><span>本人姓名</span><select id="vp-name" ${busy || recording || v.phase === 'review' ? 'disabled' : ''}>
+        <option value="">请选择正在朗读的人</option>${people.map(p => `<option value="${esc(p.name)}" ${name === p.name ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select></label>
+      <p class="fine">${recording ? '正在使用' : '录入音源'}：${esc(SOURCE_TEXT[v.source || (S.state.capturing ? S.state.source : "mic")] || '手机麦克风')}。请仅由本人朗读，避免旁人讲话或播放录音。</p>
+      <p class="section-title">${v.mode === 'test' ? '测试朗读文字（约 10 秒）' : '录入朗读文字（约 30 秒）'}</p>
+      <p class="diag">${v.mode === 'test' ? TEST_TEXT : `我是${esc(name || '（请先选姓名）')}。${ENROLL_TEXT}`}</p>
+      ${recording ? `<p class="section-title">已录 ${clock(v.elapsedMs)} / 0:${limit} · ${S.state.sourceReady ? '正在收到音频' : '等待麦克风连接'}</p>
+        <button class="btn ghost" data-act="vp-stop">结束这段录音</button>` : ''}
+      ${v.phase === 'review' ? `<p class="fine">已录 ${clock(v.elapsedMs)}。${v.mode === 'test' ? '测试只比较声音，不会更新声纹。' : `保存后替换 ${esc(name)} 的现有声纹，其他成员保留。`}</p>
+        <div class="actions two"><button class="btn ghost" data-act="vp-cancel">放弃并重录</button><button class="btn primary" data-act="vp-save" ${(v.mode === 'test' ? v.elapsedMs < 1000 : !v.qualityPassed) ? 'disabled' : ''}>${v.mode === 'test' ? '重试匹配' : '保存声纹'}</button></div>` : ''}
+      ${!recording && !busy && v.phase !== 'review' ? `<label class="switch"><span>由本人单独朗读，并同意上传声音用于声纹匹配</span><input id="vp-consent" type="checkbox"></label>
+        <div class="actions two"><button class="btn primary" data-act="vp-record" ${people.length ? '' : 'disabled'}>开始录入 · 30 秒</button>
+        <button class="btn ghost" data-act="vp-test" ${people.length ? '' : 'disabled'}>测试匹配 · 10 秒</button></div>` : ''}
+      ${v.quality ? `<p class="fine">录音 ${v.quality.seconds} 秒 · 有效音量片段 ${v.quality.active_seconds} 秒</p>` : ''}
+      ${message ? `<p class="diag" role="status">${esc(message)}</p>` : ''}
+      ${results}
+      <p class="section-title">已注册成员</p><div class="cands">${people.map(p => `<div class="cand"><span>${esc(p.name)}<span class="meta">${p.registered ? `${esc(SOURCE_TEXT[p.source] || p.source || '')} · ${p.seconds} 秒` : '未注册'}</span></span>
+        ${p.registered ? `<button class="chip ghost" data-act="vp-delete-prompt" data-name="${esc(p.name)}" ${busy || recording || v.phase === 'review' ? 'disabled' : ''}>删除</button>` : ''}</div>`).join('')}</div>
+      ${S.voiceprintDelete ? `<p class="fine">确认删除 ${esc(S.voiceprintDelete)} 的声纹？删除后需重新录入才能匹配此人。</p>
+        <button class="btn ghost" data-act="vp-delete-confirm">确认删除 ${esc(S.voiceprintDelete)}</button>` : ''}
+      <button class="chip ghost" data-act="vp-refresh" ${busy || recording || v.phase === 'review' ? 'disabled' : ''}>刷新列表</button>
+      <p class="footnote">服务器只保存声纹特征，临时录音用于提取或测试后清除。音量、时长及片段一致性检查不能验证本人身份，也不能保证识别准确。关闭本页会放弃尚未保存的录入；日常收音不受影响。</p>`;
+  }
+
+  function recordVoiceprint(mode) {
+    const name = $('vp-name').value;
+    if (mode === 'enroll' && !name) return toast('请先选择本人姓名');
+    if (!$('vp-consent').checked) return toast('请先确认本人同意上传声音');
+    S.voiceprintName = name;
+    S.voiceprintDelete = null;
+    send('voiceprint.record', { name, consent: true, mode });
   }
 
   function diagText() {
@@ -560,13 +655,17 @@
   }
 
   function applySettings() {
-    send('settings.set', {
+    const settings = {
       source: $('set-source').value,
       remoteAddress: $('set-remote').value.trim(),
       mockBackend: $('set-mock').checked,
       backendBaseUrl: $('set-url').value.trim(),
       speakerInfo: $('set-spk').checked,
-    });
+      speakerPreview: $('set-preview').checked,
+    };
+    if ($('set-clear-token').checked) settings.backendToken = '';
+    else if ($('set-token').value.trim()) settings.backendToken = $('set-token').value.trim();
+    send('settings.set', settings);
     closeSheet();
   }
 
@@ -634,10 +733,23 @@
       send('action.status', { draftId: S.draft.data.draftId });
     },
     'open-task': () => send('open.url', { url: S.draft.result.taskUrl }),
+    'vp-open': () => { S.voiceprintDelete = null; openSheet({ kind: 'voiceprint' }); send('voiceprint.list'); },
+    'vp-refresh': () => send('voiceprint.list'),
+    'vp-record': () => recordVoiceprint('enroll'),
+    'vp-test': () => recordVoiceprint('test'),
+    'vp-stop': () => send('voiceprint.stop'),
+    'vp-save': () => send('voiceprint.save'),
+    'vp-cancel': () => send('voiceprint.cancel'),
+    'vp-delete-prompt': (el) => { S.voiceprintDelete = el.dataset.name; renderSheet(); },
+    'vp-delete-confirm': () => { send('voiceprint.delete', {name: S.voiceprintDelete, confirm: true}); S.voiceprintDelete = null; },
     'apply-settings': applySettings,
     'pick-audio': () => send('testAudio.pick'),
     'reset-audio': () => send('testAudio.reset'),
   };
+
+  $('sheet').addEventListener('change', (e) => {
+    if (e.target.id === 'vp-name') { S.voiceprintName = e.target.value; renderSheet(); }
+  });
 
   $('sheet').addEventListener('click', (e) => {
     const el = e.target.closest('[data-act]');

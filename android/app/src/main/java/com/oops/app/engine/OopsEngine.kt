@@ -1,6 +1,8 @@
 package com.oops.app.engine
 
 import android.app.Application
+import android.util.Base64
+import com.oops.app.audio.VoiceprintCapture
 import androidx.core.net.toUri
 import android.os.SystemClock
 import android.util.Log
@@ -100,6 +102,7 @@ object OopsEngine {
     private val player = ClipPlayer(::onClipState)
 
     @Volatile private var api: OopsApi = MockOopsApi(Settings.TEAM)
+    @Volatile private var previewApi: OopsApi = api
 
     private val _state = MutableStateFlow(EngineState())
     val state: StateFlow<EngineState> = _state.asStateFlow()
@@ -113,12 +116,22 @@ object OopsEngine {
     // atomically, so a connection's time zero is an exact offset on the session timeline.
     private val pipeline = Any()
     private var source: AudioSource? = null
+    private var voiceprintCapture: VoiceprintCapture? = null
+    private var voiceprintPcm: ByteArray? = null
+    private var voiceprintClient: HttpOopsApi? = null
+    private var voiceprintSampleId = ""
+    private var voiceprintRevision = ""
     private var asr: VolcAsrClient? = null
     private var asrGeneration = 0
     private var asrDownSinceMs: Long? = null
     private var reconnectAttempt = 0
     private var reconnectJob: Job? = null
     private var tickJob: Job? = null
+    private val previewBusy = java.util.concurrent.atomic.AtomicBoolean(false)
+    private var previewEpoch = 0L
+    private var previewAudioStartMs = 0L
+    private var previewRequestedMs = 0L
+    private var previewResultMs = 0L
 
     @Volatile private var sessionId = ""
     @Volatile private var level = 0f
@@ -162,6 +175,7 @@ object OopsEngine {
             if (source != null) return
             settings.source = kind
             ring.reset()
+            resetSpeakerPreview()
             transcript.clear()
             cards.clear()
             drafts.keys.removeAll { !submitted.containsKey(it) }
@@ -170,36 +184,25 @@ object OopsEngine {
             optionalRequests = com.oops.app.backend.OptionalRequests()
             reconnectAttempt = 0
             asrDownSinceMs = null
-            val src = when (kind) {
-                Settings.SOURCE_WAV -> WavFileAudioSource {
-                    val uri = settings.testWavUri
-                    if (uri.isBlank()) app.assets.open(TEST_WAV)
-                    else requireNotNull(app.contentResolver.openInputStream(uri.toUri())) { "无法打开测试 WAV" }
-                }
-                Settings.SOURCE_REMOTE -> {
-                    val (host, port) = Settings.parseAddress(settings.remoteAddress)
-                        ?: ("127.0.0.1" to RemoteAudioSource.DEFAULT_PORT)
-                    RemoteAudioSource(host, port)
-                }
-                else -> MicAudioSource()
-            }
+            val src = createAudioSource(kind)
             _state.update {
                 it.copy(
                     capturing = true, source = kind, sessionId = sessionId, sessionMs = 0, bufferedMs = 0,
-                    asr = "connecting", asrDetail = null, asrGaps = emptyList(), sourceDetail = null,
+                    asr = "connecting", asrDetail = null, asrGaps = emptyList(), sourceDetail = null, sourceReady = false,
                     commitmentCount = 0, analysisPending = 0, analysisFailed = 0, tagsSupported = null, sessionTruncated = false,
                 )
             }
             try {
                 source = src
                 openAsrLocked()
-                src.start(audioListener)
+                src.start(audioListenerFor(src))
             } catch (e: Throwable) {
                 Log.e(TAG, "capture failed to start", e)
                 source = null
+                src.stop()
                 asr?.cancel()
                 asr = null
-                _state.update { it.copy(capturing = false, asr = "off", sourceDetail = null) }
+                _state.update { it.copy(capturing = false, asr = "off", sourceDetail = null, sourceReady = false) }
                 fail("capture", "无法开始收音：${e.message}")
                 CaptureService.stop(app)
                 return
@@ -221,6 +224,7 @@ object OopsEngine {
         synchronized(pipeline) {
             src = source ?: return
             source = null
+            if (voiceprintCapture != null) cancelVoiceprintRecording()
             client = asr
             reconnectJob?.cancel()
         }
@@ -229,7 +233,8 @@ object OopsEngine {
         tickJob?.cancel()
         player.stop()
         level = 0f
-        _state.update { it.copy(capturing = false, level = 0f, sourceDetail = null, asr = if (client != null) it.asr else "off") }
+        _state.update { it.copy(capturing = false, level = 0f, sourceDetail = null, sourceReady = false, asr = if (client != null) it.asr else "off") }
+        resetSpeakerPreview()
         if (client != null) {
             scope.launch {
                 delay(5_000)
@@ -245,25 +250,77 @@ object OopsEngine {
         Log.i(TAG, "capture stopped")
     }
 
-    private val audioListener = object : AudioSource.Listener {
+    private fun createAudioSource(kind: String): AudioSource = when (kind) {
+        Settings.SOURCE_WAV -> WavFileAudioSource {
+            val uri = settings.testWavUri
+            if (uri.isBlank()) app.assets.open(TEST_WAV)
+            else requireNotNull(app.contentResolver.openInputStream(uri.toUri())) { "无法打开测试 WAV" }
+        }
+        Settings.SOURCE_REMOTE -> {
+            val (host, port) = Settings.parseAddress(settings.remoteAddress)
+                ?: ("127.0.0.1" to RemoteAudioSource.DEFAULT_PORT)
+            RemoteAudioSource(host, port)
+        }
+        else -> MicAudioSource()
+    }
+
+    /** Replace only the input; the timeline, transcript, retained clips and pending work survive. */
+    private fun switchCaptureSource(kind: String) {
+        val previous = synchronized(pipeline) {
+            val active = source ?: return
+            source = null // invalidate callbacks before closing the old worker
+            _state.update { it.copy(sourceReady = false, sourceDetail = null, level = 0f) }
+            active
+        }
+        previous.stop()
+        val next = createAudioSource(kind)
+        synchronized(pipeline) {
+            source = next
+            resetSpeakerPreview()
+            level = 0f
+            _state.update { it.copy(source = kind, sourceDetail = null, sourceReady = false, level = 0f) }
+            try {
+                // Flush the old input's unfinished sentence, keeping session coordinates intact.
+                reconnectJob?.cancel()
+                restartAsrLocked()
+                next.start(audioListenerFor(next))
+                Log.i(TAG, "capture source switched: ${previous.kind} -> $kind session=$sessionId")
+            } catch (error: Exception) {
+                Log.e(TAG, "source switch failed", error)
+                fail("capture", "无法切换音源：${error.message}")
+                CaptureService.stop(app)
+            }
+        }
+    }
+
+    private fun audioListenerFor(owner: AudioSource) = object : AudioSource.Listener {
         override fun onAudio(pcm: ByteArray) {
             synchronized(pipeline) {
-                if (source == null) return
+                if (source !== owner) return
+                _state.update { if (it.sourceReady) it else it.copy(sourceReady = true) }
+                voiceprintCapture?.let { recording ->
+                    val complete = recording.append(pcm)
+                    _state.update { it.copy(voiceprint = it.voiceprint.copy(phase = "recording", elapsedMs = recording.elapsedMs)) }
+                    if (complete) finishVoiceprintRecording()
+                }
                 ring.append(pcm)
                 // 回听时给 ASR 送静音：外放的原声不会被再转写一遍，连接和时间轴也不断。
                 asr?.sendAudio(if (player.isPlaying) ByteArray(pcm.size) else pcm)
+                level = maxOf((Pcm.rms(pcm) * 5).toFloat().coerceAtMost(1f), level * 0.7f)
             }
-            level = maxOf((Pcm.rms(pcm) * 5).toFloat().coerceAtMost(1f), level * 0.7f)
         }
 
         override fun onMark(mark: AudioSource.Mark) {
-            if (mark == AudioSource.Mark.DOUBLE_TAP) triggerRecall("double_tap", null)
+            synchronized(pipeline) {
+                if (source === owner && mark == AudioSource.Mark.DOUBLE_TAP) triggerRecall("double_tap", null)
+            }
         }
 
         override fun onGap(missingMs: Long) {
             synchronized(pipeline) {
-                if (source == null) return
+                if (source !== owner) return
                 ring.appendSilence(Pcm.msToSamples(missingMs))
+                resetSpeakerPreview()
                 // ASR times are relative to the audio it received, so a gap needs a fresh connection.
                 if (asrDownSinceMs == null) asrDownSinceMs = nowMs - missingMs
                 asr?.cancel()
@@ -273,14 +330,28 @@ object OopsEngine {
         }
 
         override fun onStatus(detail: String?) {
-            if (detail != _state.value.sourceDetail) Log.i(TAG, "source: ${detail ?: "-"}")
-            _state.update { if (it.capturing) it.copy(sourceDetail = detail) else it }
+            synchronized(pipeline) {
+                if (source !== owner) return
+                if (detail != _state.value.sourceDetail) Log.i(TAG, "source: ${detail ?: "-"}")
+                _state.update { it.copy(sourceDetail = detail) }
+            }
+        }
+
+        override fun onReady(ready: Boolean) {
+            synchronized(pipeline) {
+                if (source !== owner) return
+                _state.update { it.copy(sourceReady = ready) }
+                if (!ready) _state.update { it.copy(liveSpeakers = emptyList(), liveOverlap = false, liveSpeakerStatus = "waiting") }
+            }
         }
 
         override fun onError(error: Throwable) {
-            Log.e(TAG, "audio source failed", error)
-            fail("capture", "收音中断：${error.message}")
-            CaptureService.stop(app)
+            synchronized(pipeline) {
+                if (source !== owner) return
+                Log.e(TAG, "audio source failed", error)
+                fail("capture", "收音中断：${error.message}")
+                CaptureService.stop(app)
+            }
         }
     }
 
@@ -303,6 +374,69 @@ object OopsEngine {
                 level = level,
                 playing = player.isPlaying,
             )
+        }
+        requestSpeakerPreview()
+    }
+
+    private fun resetSpeakerPreview() = synchronized(pipeline) {
+        previewEpoch++
+        previewAudioStartMs = nowMs
+        previewRequestedMs = nowMs
+        previewResultMs = 0
+        _state.update { it.copy(liveSpeakerStatus = null, liveSpeakers = emptyList(), liveOverlap = false) }
+    }
+
+    /** One rolling display request at a time; ASR and the audio thread never wait for it. */
+    private fun requestSpeakerPreview() {
+        val client = previewApi
+        if (!settings.speakerPreview || client is MockOopsApi) return
+        val request = synchronized(pipeline) {
+            val end = nowMs
+            if (source == null || !_state.value.sourceReady || player.isPlaying) return
+            if (previewResultMs > 0 && end - previewResultMs > 5000) {
+                _state.update { it.copy(liveSpeakerStatus = "waiting", liveSpeakers = emptyList(), liveOverlap = false) }
+            }
+            if (end - previewAudioStartMs < 3000 || end - previewRequestedMs < 2000 || !previewBusy.compareAndSet(false, true)) return
+            previewRequestedMs = end
+            Triple(sessionId, previewEpoch, maxOf(previewAudioStartMs, end - 10000) to end)
+        }
+        val policy = optionalRequests
+        scope.launch(Dispatchers.IO) {
+            try {
+                val (session, epoch, bounds) = request
+                val result = policy.request("speaker-preview") {
+                    val pcm = synchronized(pipeline) {
+                        if (session != sessionId || epoch != previewEpoch) null else
+                            ring.read(Pcm.msToSamples(bounds.first), Pcm.msToSamples(bounds.second))
+                    } ?: throw SpeakerAudioUnavailable()
+                    client.previewSpeakers(SpeakerRequest(session, "live", pcm, clipStartMs = bounds.first))
+                }
+                synchronized(pipeline) {
+                    if (session != sessionId || epoch != previewEpoch || !settings.speakerPreview || !_state.value.sourceReady) return@synchronized
+                    if (result == null) {
+                        _state.update { it.copy(liveSpeakerStatus = "unsupported", liveSpeakers = emptyList(), liveOverlap = false) }
+                    } else {
+                        require(result.validFor(bounds.first, bounds.second, Settings.TEAM.toSet())) { "试验预览时间或身份无效" }
+                        if (nowMs - bounds.second > 5000) return@synchronized
+                        val recent = result.activities.filter { it.endMs > bounds.second - 1500 }
+                        val overlap = recent.any { it.kind == "overlap" }
+                        val names = if (overlap) emptyList() else recent.mapNotNull { it.speaker }.distinct()
+                        previewResultMs = bounds.second
+                        _state.update { it.copy(liveSpeakerStatus = if (recent.any { a -> a.kind != "silence" }) "live" else "silence",
+                            liveSpeakers = names, liveOverlap = overlap) }
+                        Log.i(TAG, "speaker preview: overlap=$overlap names=${names.joinToString()} window=${bounds.first}-${bounds.second}")
+                    }
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                synchronized(pipeline) {
+                    if (request.first == sessionId && request.second == previewEpoch) {
+                        _state.update { it.copy(liveSpeakerStatus = "error", liveSpeakers = emptyList(), liveOverlap = false) }
+                    }
+                }
+                Log.w(TAG, "speaker preview failed: ${error.javaClass.simpleName}")
+            } finally { previewBusy.set(false) }
         }
     }
 
@@ -356,6 +490,8 @@ object OopsEngine {
             if (session != sessionId) return
             val shifted = raw.shift(baseMs)
             transcript.add(shifted.startMs, shifted.endMs, shifted.text, shifted.speakerId, shifted.words)
+                .let { added -> if (api is MockOopsApi) added else
+                    transcript.setSpeaker(added.id, added.speaker, speakerState = "pending")!! }
                 .also { sessionIndex.add(session, it) }
         }
         Log.i(TAG, "final ${u.id} [${u.startMs}-${u.endMs}] ${u.text}")
@@ -436,34 +572,61 @@ object OopsEngine {
     private fun identifySpeaker(session: String, u: Utterance) {
         val client = api
         val policy = optionalRequests
-        if (client is MockOopsApi || u.endMs - u.startMs < SPEAKER_MIN_MS) return
-        val reservation = policy.tryReserve("speaker") ?: return
+        if (client is MockOopsApi) return
+        if (u.endMs - u.startMs < SPEAKER_MIN_MS) {
+            publishSpeakerMatch(session, u, null, "too_short")
+            return
+        }
+        val reservation = policy.tryReserve("speaker") ?: run {
+            publishSpeakerMatch(session, u, null, "busy")
+            return
+        }
         scope.launch(Dispatchers.IO) {
-            val result = runCatching { policy.request(reservation) {
+            runCatching { policy.request(reservation) {
                 // A queued job retains only text/id; PCM is copied only with an execution permit.
                 val pcm = synchronized(pipeline) {
-                    if (session != sessionId) null else ring.read(Pcm.msToSamples(u.startMs), Pcm.msToSamples(u.endMs))
+                    if (session != sessionId) null else ring.readWithEndTolerance(Pcm.msToSamples(u.startMs),
+                        Pcm.msToSamples(u.endMs), Pcm.msToSamples(Pcm.FRAME_MS.toLong()))
                 }
-                    ?: return@request com.oops.app.backend.SpeakerResult(null, 0.0)
-                client.identifySpeaker(SpeakerRequest(session, u.id, pcm, u.text, u.startMs, u.words,
-                    sessionIndex.preceding(u.id, 4).map { it.toCandidate() }))
+                    ?: throw SpeakerAudioUnavailable()
+                val request = SpeakerRequest(session, u.id, pcm, u.text, u.startMs, u.words,
+                    sessionIndex.preceding(u.id, 4).map { it.toCandidate() }, settings.speakerPreview, u.endMs)
+                val result = client.identifySpeaker(request)
+                if (settings.speakerPreview && result != null && result.preview == null) {
+                    val preview = runCatching { previewApi.previewSpeakers(request) }.getOrNull()
+                    result.copy(preview = preview)
+                } else result
             } }
-                .onFailure { Log.w(TAG, "speaker id failed for ${u.id}: ${it.message}") }
-                .getOrNull()
-            if (result == null) return@launch
-            val name = result.speaker
-            val segments = result.usableSegments(u)
-            if (name == null && segments.isEmpty()) return@launch
-            synchronized(pipeline) {
-                if (session != sessionId) return@synchronized
-                sessionIndex.setSpeaker(session, u.id, name, segments)
-                transcript.setSpeaker(u.id, name, segments)?.let {
-                Log.i(TAG, "speaker ${u.id} = $name (${"%.2f".format(result.score)})")
-                emit(OopsEvent.SpeakerIdentified(u.id, name, result.score, segments))
+                .onSuccess { result ->
+                    publishSpeakerMatch(session, u, result, when {
+                        result == null -> "unsupported"
+                        result.speaker != null || result.usableSegments(u).isNotEmpty() -> "matched"
+                        else -> "unconfirmed"
+                    })
                 }
-            }
-            publishSessionSummary(session)
+                .onFailure { error ->
+                    Log.w(TAG, "speaker id failed for ${u.id}: ${error.message}")
+                    publishSpeakerMatch(session, u, null, if (error is SpeakerAudioUnavailable) "audio_unavailable" else "error")
+                }
         }.invokeOnCompletion { reservation.close() }
+    }
+
+    private class SpeakerAudioUnavailable : IllegalStateException("声纹音频已过期或尚未完整到达")
+
+    private fun publishSpeakerMatch(session: String, u: Utterance, result: com.oops.app.backend.SpeakerResult?, status: String) {
+        synchronized(pipeline) {
+            if (session != sessionId) return
+            val name = result?.speaker ?: u.speaker
+            val segments = result?.usableSegments(u).orEmpty()
+            val score = result?.score?.takeIf { it.isFinite() }
+            val preview = if (settings.speakerPreview) result?.preview?.forUtterance(u, Settings.TEAM.toSet()) else null
+            sessionIndex.setSpeaker(session, u.id, name, segments, status, score, preview)
+            transcript.setSpeaker(u.id, name, segments, status, score, preview)?.let {
+                Log.i(TAG, "speaker ${u.id}: $status name=$name score=$score")
+                emit(OopsEvent.SpeakerIdentified(u.id, name, score, segments, status, preview))
+            }
+        }
+        publishSessionSummary(session)
     }
 
     private fun onAsrClosed(generation: Int, error: String?, fatal: Boolean) {
@@ -763,7 +926,7 @@ object OopsEngine {
         val request = operation.request
         val draftId = request.draft.draftId
         val client = if (operation.mock) api.takeIf { it.name == "mock" } ?: MockOopsApi(Settings.TEAM)
-            else HttpOopsApi(http, operation.backendUrl)
+            else HttpOopsApi(http, operation.backendUrl, settings.backendTokenFor(operation.backendUrl))
         emit(OopsEvent.ActionUpdate(draftId,
             ActionResult(request.opId, ActionResult.PENDING, polling = true, mock = operation.mock)))
         scope.launch {
@@ -793,16 +956,173 @@ object OopsEngine {
         emit(OopsEvent.Toast("已选择测试音频，下次开始收音时生效"))
     }
 
+    // ---- self-service voiceprint recording -------------------------------------------------
+
+    fun loadVoiceprints() {
+        require(_state.value.voiceprint.phase !in setOf("saving", "testing")) { "请等待当前请求结束" }
+        cancelVoiceprintRecording()
+        val client = api as? HttpOopsApi ?: run { voiceprintError("请先连接真实服务器，Mock 不支持录入声纹"); return }
+        val id = UUID.randomUUID().toString()
+        synchronized(pipeline) {
+            voiceprintSampleId = id
+            _state.update { it.copy(voiceprint = it.voiceprint.copy(phase = "loading", message = "")) }
+        }
+        scope.launch {
+            runCatching { client.voiceprints() }.onSuccess { catalog ->
+                synchronized(pipeline) {
+                    if (voiceprintSampleId == id) _state.update { it.copy(voiceprint = VoiceprintState(catalog = catalog)) }
+                }
+            }.onFailure { synchronized(pipeline) { if (voiceprintSampleId == id) voiceprintError(it.message ?: "加载失败") } }
+        }
+    }
+
+    fun beginVoiceprintRecording(name: String, consent: Boolean, mode: String) {
+        synchronized(pipeline) {
+            require(consent) { "请确认本人同意上传声音用于声纹匹配" }
+            require(mode in setOf("enroll", "test")) { "录音模式无效" }
+            require(mode == "test" || name in Settings.TEAM) { "请先选择本人姓名" }
+            require(_state.value.voiceprint.phase !in setOf("saving", "testing", "checking", "loading", "recording")) { "请等待当前操作结束" }
+            val kind = source?.kind ?: Settings.SOURCE_MIC
+            require(kind in setOf(Settings.SOURCE_MIC, Settings.SOURCE_REMOTE)) { "请先切换到手机或 Mac 麦克风，不能用测试 WAV 注册" }
+            val client = api as? HttpOopsApi ?: error("请先连接真实服务器")
+            val catalog = _state.value.voiceprint.catalog ?: error("请先刷新声纹列表")
+            voiceprintClient = client
+            voiceprintRevision = catalog.getString("revision")
+            voiceprintSampleId = UUID.randomUUID().toString()
+            voiceprintPcm = null
+            voiceprintCapture = VoiceprintCapture(if (mode == "test") 10_000 else 30_000)
+            _state.update { it.copy(voiceprint = VoiceprintState("recording", name, mode, source = kind, catalog = catalog)) }
+        }
+    }
+
+    fun finishVoiceprintRecording() {
+        synchronized(pipeline) {
+            val recording = voiceprintCapture ?: return
+            val elapsed = recording.elapsedMs
+            voiceprintPcm = recording.finish()
+            voiceprintCapture = null
+            _state.update { it.copy(voiceprint = it.voiceprint.copy(phase = "review", elapsedMs = elapsed,
+                message = if (elapsed < 15_000 && it.voiceprint.mode == "enroll") "录音不足 15 秒，请重新朗读" else "录音已完成")) }
+            if (_state.value.voiceprint.mode == "test" && elapsed >= 1_000) submitVoiceprintRecording()
+            else if (_state.value.voiceprint.mode == "enroll" && elapsed >= 15_000) checkVoiceprintRecording()
+        }
+    }
+
+    private fun checkVoiceprintRecording() {
+        val id = voiceprintSampleId
+        val client = requireNotNull(voiceprintClient)
+        val body = JSONObject().put("sample_rate", 16000).put("pcm_base64",
+            Base64.encodeToString(requireNotNull(voiceprintPcm), Base64.NO_WRAP))
+        _state.update { it.copy(voiceprint = it.voiceprint.copy(phase = "checking", message = "")) }
+        scope.launch {
+            runCatching { client.testVoiceprint(body) }.onSuccess { result ->
+                synchronized(pipeline) {
+                    if (id != voiceprintSampleId) return@synchronized
+                    val q = result.getJSONObject("quality")
+                    val passed = q.getDouble("seconds") >= 15 && q.getDouble("active_seconds") >= 8 && q.getDouble("clipped_ratio") <= .01
+                    _state.update { it.copy(voiceprint = it.voiceprint.copy(phase = "review", quality = q, qualityPassed = passed,
+                        message = if (passed) "音量与时长检查通过；保存时还会检查片段一致性" else "有效声音不足或音量过大，请靠近麦克风自然朗读后重录")) }
+                }
+            }.onFailure { error -> synchronized(pipeline) { if (id == voiceprintSampleId) _state.update {
+                it.copy(voiceprint = it.voiceprint.copy(phase = "review", qualityPassed = false,
+                    message = "质量检查失败：${error.message}，请放弃并重录"))
+            } } }
+        }
+    }
+
+    fun submitVoiceprintRecording() {
+        val id: String
+        val client: HttpOopsApi
+        val body: JSONObject
+        val testing: Boolean
+        synchronized(pipeline) {
+            val state = _state.value.voiceprint
+            require(state.phase == "review") { "请先完成录音" }
+            val pcm = voiceprintPcm ?: error("录音已清除，请重新录入")
+            testing = state.mode == "test"
+            require(testing || state.qualityPassed) { "录音质量尚未通过，请重新朗读" }
+            require(pcm.size >= if (testing) 32000 else 15 * 32000) { "录音太短，请重新朗读" }
+            client = requireNotNull(voiceprintClient)
+            id = voiceprintSampleId
+            body = JSONObject().put("name", state.name).put("source", state.source).put("sample_id", id)
+                .put("sample_rate", 16000).put("pcm_base64", Base64.encodeToString(pcm, Base64.NO_WRAP))
+                .put("consent", true).put("single_speaker", true).put("expected_revision", voiceprintRevision)
+            _state.update { it.copy(voiceprint = state.copy(phase = if (testing) "testing" else "saving", message = "")) }
+        }
+        scope.launch {
+            runCatching { if (testing) client.testVoiceprint(body) else client.enrollVoiceprint(body) }.onSuccess { result ->
+                synchronized(pipeline) {
+                    if (id != voiceprintSampleId) return@synchronized
+                    voiceprintPcm = null
+                    _state.update { it.copy(voiceprint = it.voiceprint.copy(phase = "idle",
+                        catalog = if (testing) it.voiceprint.catalog else result,
+                        diagnosis = if (testing) result else null,
+                        message = if (testing) "匹配测试完成" else "声纹已保存，可换一段文字测试")) }
+                }
+            }.onFailure { error ->
+                synchronized(pipeline) {
+                    if (id == voiceprintSampleId) _state.update { it.copy(voiceprint = it.voiceprint.copy(phase = "review",
+                        message = (error.message ?: "请求失败") + "；可重试同一录音，或刷新核对保存结果")) }
+                }
+            }
+        }
+    }
+
+    fun deleteVoiceprint(name: String) {
+        require(_state.value.voiceprint.phase == "idle") { "请等待当前操作结束" }
+        require(name in Settings.TEAM) { "成员无效" }
+        val client = api as? HttpOopsApi ?: error("请先连接真实服务器")
+        val catalog = requireNotNull(_state.value.voiceprint.catalog)
+        val id = UUID.randomUUID().toString()
+        synchronized(pipeline) {
+            voiceprintSampleId = id
+            voiceprintCapture = null
+            voiceprintPcm = null
+            _state.update { it.copy(voiceprint = it.voiceprint.copy(phase = "saving", message = "")) }
+        }
+        scope.launch {
+            runCatching { client.deleteVoiceprint(JSONObject().put("name", name).put("confirm", true)
+                .put("expected_revision", catalog.getString("revision"))) }.onSuccess { result ->
+                synchronized(pipeline) { if (id == voiceprintSampleId) _state.update {
+                    it.copy(voiceprint = VoiceprintState(catalog = result, message = "已删除 $name 的声纹"))
+                } }
+            }.onFailure { synchronized(pipeline) { if (id == voiceprintSampleId) voiceprintError(it.message ?: "删除失败，请刷新核对") } }
+        }
+    }
+
+    fun cancelVoiceprintRecording() {
+        synchronized(pipeline) {
+            voiceprintSampleId = UUID.randomUUID().toString()
+            voiceprintCapture = null
+            voiceprintPcm = null
+            voiceprintClient = null
+            _state.update { it.copy(voiceprint = VoiceprintState(catalog = it.voiceprint.catalog)) }
+        }
+    }
+
+    private fun voiceprintError(message: String) {
+        _state.update { it.copy(voiceprint = it.voiceprint.copy(phase = "idle", message = message)) }
+    }
+
     // ---- settings --------------------------------------------------------------------------
 
     fun applySettings(json: JSONObject) {
-        if (json.has("source")) settings.source = json.getString("source")
+        val previousBackend = settings.backendBaseUrl
+        val previousMock = settings.mockBackend
+        val activeKind = synchronized(pipeline) { source?.kind }
+        val previousAddress = settings.remoteAddress
+        if (json.has("source")) {
+            val kind = json.getString("source")
+            require(kind in setOf(Settings.SOURCE_MIC, Settings.SOURCE_WAV, Settings.SOURCE_REMOTE)) { "音源无效" }
+            settings.source = kind
+        }
         if (json.has("remoteAddress")) {
             val address = json.getString("remoteAddress").trim()
             if (Settings.parseAddress(address) != null) settings.remoteAddress = address
             else fail("settings", "Mac 收音地址格式应为 主机:端口，例如 127.0.0.1:7790")
         }
         if (json.has("backendBaseUrl")) settings.backendBaseUrl = json.getString("backendBaseUrl")
+        if (json.has("backendToken")) settings.backendToken = json.getString("backendToken")
         if (json.has("mockBackend")) settings.mockBackend = json.getBoolean("mockBackend")
         val url = settings.backendBaseUrl
         if (!settings.mockBackend && !(url.startsWith("http://") || url.startsWith("https://"))) {
@@ -811,19 +1131,46 @@ object OopsEngine {
         }
         val speakerChanged = json.has("speakerInfo") && json.getBoolean("speakerInfo") != settings.speakerInfo
         if (json.has("speakerInfo")) settings.speakerInfo = json.getBoolean("speakerInfo")
+        if (json.has("speakerPreview")) settings.speakerPreview = json.getBoolean("speakerPreview")
+        if (com.oops.app.BuildConfig.DEBUG && json.has("speakerPreviewUrl")) {
+            val value = json.getString("speakerPreviewUrl").trim()
+            require(value.isEmpty() || value.toUri().host in setOf("127.0.0.1", "localhost") && value.startsWith("http://")) {
+                "独立试验分析地址仅允许本机回环"
+            }
+            settings.speakerPreviewUrl = value
+            if (json.has("speakerPreviewToken") && value.isNotEmpty()) settings.setBackendTokenFor(value, json.getString("speakerPreviewToken"))
+        }
+        if (json.has("speakerPreview") || json.has("speakerPreviewUrl") || previousBackend != settings.backendBaseUrl || previousMock != settings.mockBackend) {
+            optionalRequests = com.oops.app.backend.OptionalRequests()
+            resetSpeakerPreview()
+        }
+        if (previousBackend != settings.backendBaseUrl || previousMock != settings.mockBackend) {
+            cancelVoiceprintRecording()
+            _state.update { it.copy(voiceprint = VoiceprintState(message = "服务器已切换，请刷新声纹列表")) }
+        }
         rebuildApi()
-        if (speakerChanged) synchronized(pipeline) { restartAsrLocked() }
+        val sourceChanged = activeKind != null && ((json.has("source") && activeKind != settings.source) ||
+            (activeKind == Settings.SOURCE_REMOTE && previousAddress != settings.remoteAddress))
+        if (sourceChanged) {
+            cancelVoiceprintRecording()
+            switchCaptureSource(settings.source)
+        }
+        else if (speakerChanged) synchronized(pipeline) { restartAsrLocked() }
         emit(OopsEvent.Toast("设置已保存"))
     }
 
     private fun rebuildApi() {
         val url = settings.backendBaseUrl
-        api = if (settings.mockBackend || url.isBlank()) MockOopsApi(Settings.TEAM) else HttpOopsApi(http, url)
+        api = if (settings.mockBackend || url.isBlank()) MockOopsApi(Settings.TEAM) else HttpOopsApi(http, url, settings.backendToken)
+        val previewUrl = if (com.oops.app.BuildConfig.DEBUG) settings.speakerPreviewUrl else ""
+        previewApi = if (previewUrl.isBlank()) api else HttpOopsApi(http, previewUrl, settings.backendTokenFor(previewUrl))
         _state.update {
             it.copy(
                 backend = api.name,
                 backendUrl = url,
+                hasBackendToken = settings.backendToken.isNotBlank(),
                 speakerInfo = settings.speakerInfo,
+                speakerPreviewEnabled = settings.speakerPreview,
                 source = if (it.capturing) it.source else settings.source,
                 remoteAddress = settings.remoteAddress,
             )

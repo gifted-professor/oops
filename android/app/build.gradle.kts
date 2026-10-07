@@ -31,6 +31,7 @@ android {
         targetSdk = 36
         versionCode = 1
         versionName = "0.1.0"
+        testInstrumentationRunner = "com.oops.app.RemoteBackendSmoke"
 
         buildConfigField("String", "VOLC_API_KEY", "\"${configValue("VOLC_API_KEY")}\"")
         buildConfigField("String", "VOLC_APP_ID", "\"${configValue("VOLC_APP_ID")}\"")

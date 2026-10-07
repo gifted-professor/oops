@@ -185,6 +185,15 @@ button:disabled { opacity: 0.45; cursor: default; }
 .cand .radio { width: 16px; height: 16px; border-radius: 50%; border: 2px solid var(--line); margin-top: 3px; }
 .cand.on .radio { border: 5px solid var(--brand); }
 .cand .t { font-size: 14px; }
+.sheet[data-kind="voiceprint"] .cand { grid-template-columns: minmax(0, 1fr) auto; align-items: center; }
+.sheet[data-kind="voiceprint"] .actions.two { grid-template-columns: 1fr 1fr; }
+.sheet[data-kind="voiceprint"] .diag { font-size: 14px; line-height: 1.75; font-family: inherit; white-space: normal; word-break: normal; }
+.sheet[data-kind="voiceprint"] .section-title { margin: 16px 0 6px; font-size: 13px; font-weight: 700; }
+.spk.spk-status { color: var(--muted); background: var(--bg); border: 1px solid var(--line); }
+.speaker-preview-status { margin-top: 8px; color: var(--muted); font-size: 12px; }
+.preview-note { display: block; color: var(--muted); font-size: 11px; margin-bottom: 4px; }
+.preview-segment { display: block; margin: 4px 0; }
+.preview-overlap { border-left: 2px solid var(--muted); padding-left: 8px; }
 .prob { height: 4px; border-radius: 2px; background: var(--line); margin-top: 6px; overflow: hidden; }
 .prob > i { display: block; height: 100%; background: var(--brand); }
 .actions { display: grid; grid-template-columns: 1fr 1fr 1.6fr; gap: 10px; margin-top: 18px; }

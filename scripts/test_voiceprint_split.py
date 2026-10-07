@@ -23,7 +23,7 @@ class EvaluationTest(unittest.TestCase):
     def test_named_deadlines_survive_jev_guard_but_self_stays_disabled(self):
         class OwnerJev:
             def choice(self, *args):
-                return {"choice": "p3", "probabilities": {"p3": 1}}, "test"
+                return {"choice": "p2", "probabilities": {"p2": 1}}, "test"
         text = "玉麟，你周五之前把方案发我"
         self.assertEqual(("named", "洪玉麟"), commitment_evidence(text))
         self.assertEqual("洪玉麟", resolve_owner({"utterances": [{"text": text}]}, OwnerJev()))
@@ -31,6 +31,8 @@ class EvaluationTest(unittest.TestCase):
             self.assertEqual(("named", "林春源"), commitment_evidence(text), text)
         self.assertEqual(("self", None), commitment_evidence("我周五之前把方案发给你"))
         self.assertIsNone(resolve_owner({"utterances": [{"text": "我周五之前把方案发给你", "speaker": "洪玉麟"}]}))
+        self.assertEqual(("named", "黄丽萍"), commitment_evidence("Lydia，你周五之前把方案发我"))
+        self.assertEqual(("unknown", None), commitment_evidence("Lydia说我周五之前把方案发你"))
         for text in ("我之前发给你了", "我之前说过我来做", "我上周五之前把方案发了", "他说我周五之前提交",
                      "我周五之前已经发给你了", "我周五之前不负责提交", "我周五之前提交吗？"):
             self.assertEqual(("unknown", None), commitment_evidence(text), text)
@@ -41,6 +43,13 @@ class EvaluationTest(unittest.TestCase):
         self.manifest = {"hash": "frozen", "cases": [self.case]}
         self.answer = {"cuts": [2], "segments": [{"speakers": ["洪玉麟"]}, {"speakers": ["林春源"]}],
                        "self_present": False, "self_owner": None, "reviewed": True}
+
+    def test_jev_owner_receives_verified_display_name_alias(self):
+        class AliasJev:
+            def choice(inner, state, question, criteria):
+                self.assertIn("Lydia", criteria["p0"])
+                return {"choice": "p0", "probabilities": {"p0": 1}}, "test"
+        self.assertEqual("黄丽萍", resolve_owner({"utterances": [{"text": "Lydia，你周五之前把方案发我"}]}, AliasJev()))
 
     def test_truth_requires_real_labels_and_allowed_boundaries(self):
         body = {"manifest_hash": "frozen", "answers": {"u1": self.answer}}

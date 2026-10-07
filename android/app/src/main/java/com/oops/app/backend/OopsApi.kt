@@ -22,16 +22,18 @@ interface OopsApi {
     /** Voiceprint lookup for one sentence's audio (16 kHz mono s16le); null when the backend can't tell. */
     suspend fun identifySpeaker(request: SpeakerRequest): SpeakerResult? = null
     suspend fun tagUtterance(request: TagRequest): TagResult? = null
+    suspend fun previewSpeakers(request: SpeakerRequest): com.oops.app.buffer.SpeakerPreview? = null
 }
 
 class SpeakerRequest(
     val sessionId: String, val utteranceId: String, val pcm: ByteArray,
     val text: String = "", val clipStartMs: Long = 0,
     val words: List<WordTime> = emptyList(), val context: List<Candidate> = emptyList(),
+    val preview: Boolean = false, val clipEndMs: Long = clipStartMs + pcm.size / 32,
 )
 
 data class SpeakerResult(val speaker: String?, val score: Double, val segments: List<SpeakerSegment> = emptyList(),
-    val segmentsValidated: Boolean = false) {
+    val segmentsValidated: Boolean = false, val preview: com.oops.app.buffer.SpeakerPreview? = null) {
     fun usableSegments(u: Utterance): List<SpeakerSegment> {
         if (!segmentsValidated || segments.isEmpty() || segments.joinToString("") { it.text } != u.text) return emptyList()
         if (segments.first().startMs != u.startMs || segments.last().endMs != u.endMs) return emptyList()

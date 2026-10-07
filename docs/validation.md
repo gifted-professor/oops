@@ -161,3 +161,73 @@ manifest 和副本在 gitignored `test-media/`。前三分钟仅是候选样本�
 `./scripts/check.sh lintDebug` 通过：Android 66 项、0 失败；后端自检与 Python 9 项通过；Lint 无问题。日志 `evidence/jev-review-fixes-final-check.log`。修订 APK SHA-256：`d8202ec44ef8dcc547df1abc872a48cfda68b9d2785130acf16138bcca471ddb`，已安装 Redmi。本轮未运行新的 6 分钟、全天压力或真人 Hollyland 验收，前述长于 5 分钟证据对应基线版本；这些新检查不能替代真实标注与听感。
 
 修订 APK 使用内置 WAV + 隔离规则后端完成 5 句真实 ASR、承诺汇总 1、打开 u4 原句、起草负责人留空的手机 smoke；`evidence/jev-review-phone-smoke.json`、`jev-review-phone-card.txt`、`jev-review-phone-draft.json`。测试未确认飞书任务。结束后停止收音、恢复原调试设置、撤除本轮 adb 映射并关闭隔离服务；8793 盲标页及原服务保留。
+
+## 手机连接香港后端（2026-10-06；服务器 UTC 2026-10-07）
+
+已完成这轮迁移闭环，详见 [部署记录](server-deployment.md)。Redmi 使用移动网络，全部 adb reverse 撤除，Mac 本地业务后端未运行；HTTPS 后端为 `https://giftedprofessor.xyz/oops-meeting`，Mock 关闭且访问凭据已配置。
+
+- 内置合成 WAV 经真实火山 ASR 得到 5 条定稿，手机调用远程 Jev 标签与声纹接口，UI 标签为约束／想法／约束／承诺／决定；召回取回「那我周五前把新方案发你。」。证据 `.local-backend/diagnostics/phone-server-transcript.png`、`phone-server-recall.png`。合成声音返回未知说话人，没有冒充注册真人。
+- 物理手机原生测试复用实际 `HttpOopsApi`、`ActionWorkflow` 与 App 持久化操作库，点名草稿负责人为林春源；确认创建明确标为合成测试的任务，GUID `5633ee62-6b72-48a9-8f17-8644c48517a3`，回读确认成功。重复同一操作返回同一 GUID，服务器 `attempts=1`。这是设备客户端测试，没有冒充真人点击界面。
+- 重启香港 `oops-backend` 后，手机再次查询和回读同一 GUID；服务器 CLI 独立重新读取飞书任务，标题、负责人和测试约束均正确。服务已启用自启，没有重启整台主机。
+- 新 Oops 组织的林春源、江古月、洪玉麟、黄丽萍（Lydia）映射齐全。规则和 Jev 均识别 Lydia 别名，未映射成员在服务器严格模式下直接报错。
+- 缺失/错误服务凭据的 health、查询、确认、标签和声纹请求均返回 401；鉴权测试证明不会先执行飞书写入。两端 Nginx 配置测试通过；原官网及已有路由复查正常。
+- `./scripts/check.sh lintDebug` 通过：68 项 Android 单测、0 失败，后端 self-test、10 项评估/规则测试、1 项 HTTP 鉴权测试；Lint `No issues found`。完整日志 `.local-backend/diagnostics/server-migration-check.log`。
+- 测试后卸载测试 APK（保留主 App），恢复手机麦克风并开始实时收音；`phone-server-ready.png` 显示「手机麦克风／收音中／实时识别中」。USB 不再承载后端或音频转发。
+
+本轮没有替代真人语音/回听听感、迁移后网络切换、全天运行和人工标注准确率验收。当前句内拆分关闭，`segments_validated=false`，self 自动负责人也没有绕过闸门。Hollyland 接在 Mac 的选项仍依赖现场收音桥。
+
+设备测试需先单独构建安装 androidTest APK；默认不执行网络访问。显式 `-e remoteSmoke true` 做只读/草稿核验；只有额外 `-e confirm true` 才确认测试任务，使用持久化的同一测试操作防重。此命令用于人工安排的集成验收，不纳入默认 CI。
+
+## 音源切换与错误状态修复（2026-10-07）
+
+用户报告切换到手机麦克风后仍看到 Mac 未连接。实际复现：收音中的 `settings.set(source=mic)` 只保存了下次音源，当前 remote worker 未替换；旧版同时仅根据 ASR socket 显示「实时识别中」，即使没有 PCM。旧 APK 的真机回归测试明确失败，仍为 remote/重试状态，证据 `.local-backend/diagnostics/source-switch-baseline.txt`、`source-switch-before.png`。
+
+修复后，设置保存音源或修改正在使用的 Mac 地址，会立即替换输入，不清空 session、会话索引、字幕和环形缓存。切换时刷新 ASR 连接来结束旧输入的未定稿句；所有音频/状态/错误/标记回调按音源实例过滤，旧 worker 不能污染新输入。增加 `sourceReady`，等待或断开时 UI 显示「等待收音／等待音源」，实际收到 PCM 后才显示收音中。
+
+物理 Redmi 原生回归通过：断开的 Mac 与手机麦克风之间反复切换 3 轮，旧提示不回写；接通实际 Wireless microphone 收音桥、保持 remote 模式只改地址能立即重连；内置 WAV 产生真实 ASR 定稿后切回麦克风，原句 ID、本场 session 和缓存仍保留。测试报告 `passed=true, mac_connected=true, session_preserved=true, transcript_preserved=true, source=mic, buffered_ms=9300`，见 `.local-backend/diagnostics/source-switch-all-sources.txt`。这是连接和输入切换测试，不替代真人回听听感验收。
+
+`./scripts/check.sh lintDebug` 通过：68 Android 单测、后端自检、10 项 Python 评估/规则测试、1 项 HTTP 鉴权测试，Lint 无问题。新 APK SHA-256 `f24024189cd9c5cb9614834057ce4027d2a7775859c4e03c13b9a00e6ec36d94`，已安装。完整日志 `source-switch-check.log`。测试结束卸载测试 APK，撤除临时音频 adb reverse，保留主 App 的手机麦克风收音与 HTTPS 后端配置。等待/就绪画面分别为 `source-switch-waiting.png`、`source-switch-ready.png`。
+
+复跑原生切换测试需要显式 `-e sourceSwitch true`，同时用 adb 启动前台 Activity 的 DEBUG_START remote（测试地址 `127.0.0.1:1`）。可选 `-e macAddress 127.0.0.1:7790` 验证实际桥，运行前临时设置音频 adb reverse，结束撤除；该测试会启动一场新录音，请仅在安排好的设备验收时运行。
+
+
+## App 与服务器网页自助声纹录入（2026-10-07）
+
+App 已增加设置页入口、本人姓名/同意、固定 30 秒朗读、时长/音量预检、明确保存及不同文本 10 秒匹配。临时缓冲有上限，WAV 注册被拒绝；保存仅替换选中成员，网络重试复用 frozen sample_id；删除后重启不恢复旧 seed。服务器公开手机页配套四个独立到期邀请，权限仅为本人录入及测试。不同成员用独立 profile_revision 可同时保存；同一成员的旧版本不能覆盖。
+
+验证：`./scripts/check.sh lintDebug` 成功，71 项 Android 单测（0 失败）、后端自检、10 项评估/规则测试、2 项 HTTP 鉴权/邀请测试、8 项注册表/质量测试，Lint `No issues found`。完整日志 `.local-backend/diagnostics/voiceprint-web-check.log`；新增 web PCM 转换检查对 16/44.1/48 kHz 的 30 秒时长及语音带波形、削波范围共 4 项通过。之后独立重跑 HTTP 测试与音频检查通过。
+
+真实 CAM++ 模型在临时目录用既有 WAV 重复成 30 秒，完成提取、保存、重复提交防重、重启加载和同一输入匹配；其他成员向量未变。该夹具只验技术闭环，不把同一录音匹配算作识别准确率，也没有写生产声纹。
+
+Redmi 原生集成测试实录手机麦克风 10 秒并经 HTTPS 调用在线 test，获取四人比较和录音质量；拒绝无同意录入，前后目录 revision 相同。证据 `.local-backend/diagnostics/voiceprint-phone-test.txt`。自动测试只诊断没有声纹写入；未知结果说明音频未达当前匹配门槛，不是准确率验收。App 麦克风链路不能替代所有移动浏览器兼容性验收。
+
+生产 HTTPS 核验四个本人目录、禁止写他人声纹/删除/飞书、禁止匿名 API、静音录入被拒；进程重启后目录未变。种子声纹哈希未变，运行时 voiceprints.json 尚未生成。摘要 `.local-backend/diagnostics/voiceprint-web-verification.json`。线上朗读 UI、同意开关和禁用按钮在 390 px 手机尺寸可用，截图 `.local-backend/diagnostics/voiceprint-web-ready.jpg`。四人尚未现场录入；新的识别准确率及跨设备/多人会议效果仍须独立真人评估，拆分和 self 闸门仍关闭。
+
+最终修正 App 成员列表和朗读文本的手机排版后，重新 assembleDebug 并安装 Redmi，截图 `voiceprint-enrollment-ready.png` 已核对。最终 APK SHA-256：`1cbc3f04aacb892eff44a36d5f3cf00ff8d47a26f8222cad7fa2e11017475fd3`。该最后一步只调整 H5 排版及音源文案；原生测试逻辑未改，JS 语法检查通过。测试 APK 已卸载，正式 App 保留；adb reverse 列表为空。
+
+
+## 字幕声纹留空：音频结束边界及状态显示（2026-10-07）
+
+用户实测 3 句均无姓名。取回同一进程中尚存的 13.4 秒 PCM 缓冲，配合原 ASR 日志定位：u3 为 [10562,13402] ms，而实际 ring.endSample=214400（13400 ms）。严格 ring.read 对多出的 2 ms 返回 null，声纹协程直接跳过；不是服务器没有新注册声纹。用当前线上模型对原片段重新查询：u1 最高林春源 0.471、u2 最高洪玉麟 0.403，均低于 0.5；u3 洪玉麟 0.547、第二名 0.199，满足门槛。此处为模型匹配结果，尚未收到真人逐句身份答案，不能当准确率真值。
+
+修复仅对声纹读取允许最多一帧（100 ms）的尾部误差，截取实际持有的音频；不补造音频，不取已过期的开头，不接受更大的缺口。严格的证据回听读取规则保持原样。未匹配、太短、无音频、排队拥挤、服务不支持及请求错误都发出状态；snapshot、字幕及会话索引保存 speakerState/speakerScore，标签异步更新不会覆盖它们。未确认结果的 speaker 仍为 null，不能被当成负责人。
+
+完整 check.sh lintDebug 通过，Lint 无问题；随后新增标签/声纹状态并发更新回归测试并单独重跑单测，共 74 项、0 失败。包含原 2 ms 越界、过期/大缺口拒绝的回归。日志 voiceprint-blank-fix-check.log 与 voiceprint-blank-fix-unit.log。
+
+修订 APK 已安装 Redmi。把刚才录音作为明确的测试 WAV，通过真实 ASR → HttpOopsApi → 当前在线 CAM++ → H5 字幕完整回放：前两句显示未确认 0.47/0.40，最后一句显示洪玉麟。回放时最后一句 ASR 尾部多了静音，分数为 0.511；不同于原片段直接诊断的 0.547，两者都通过现有门槛。原生报告 voiceprint-replay-fixed.txt、截图 voiceprint-replay-fixed.png。回放不是新的真人语音验收。四人模板和门槛未改，无声纹写入。测试 APK、临时诊断 PCM/WAV 和 adb 调试转发已清理；手机恢复 mic、Mock=false、原 HTTPS 后端，默认测试 WAV 恢复内置合成对话。最终 APK SHA-256：47b8ffa6f7eecb13413a934b2dae4d551d5ca9f0325e6875e62e0061742e1857。
+
+
+## 2026-10-07 实时说话人预览试验：开发状态
+
+新增声学换人/重叠活动检测、逐段声纹和 Jev 候选辅助，默认关闭，正式 segments/self 负责人闸门未开启。滚动预览与最终句内试验分段独立于任务证据。新增 4 个 Android 单测、7 个 Python 试验测试；完整检查日志 `.local-backend/diagnostics/speaker-preview-check.log`。
+
+工程音频试跑不能视为准确率验收：第一组旧 DJI 人工单人标签片段混合时，设计的 2.261 秒重叠覆盖率约 39.8%；其中 03.wav 单独运行约 99.5% 被判重叠，标签与声学模型存在冲突，尚未真人复核。另选模型认为单人的 15.wav/11.wav 混合后，设计 3 秒重叠完全漏报；这组还是经过模型筛选的样本，不能作为独立验收。报告分别位于 `.local-backend/diagnostics/speaker-preview-controlled.json` 和 `speaker-preview-controlled-clean.json`。据此界面仅显示「疑似多人同时说话」，不得宣称重叠可靠或已分离两路音频。
+
+发现局部说话人编号可能合并不同人物后，移除不连续片段拼接/共享姓名，改为每个连续片段至多 3.2 秒独立匹配。需要现场单人、轮流说话与真实重叠的独立标注测试，核对换人边界、错名、漏报和时延。当前 Hollyland/Mac 捕获的左右通道实际相同，不能作为每人独立通道。
+
+新版 App 已安装，已核对恢复 Mac 收音 Wireless microphone、实时 ASR 和缓存增长。测试包安装被手机取消，真机试验自动测试尚未执行成功；香港后台虽登录，部署所需 SSH 连接仍待恢复。服务器试验开关尚未启用；不能把本地服务/API 试跑写成云端交付。
+
+
+### 后续：香港及手机试验已开启
+
+上述部署阻碍已解除：用户提供 SSH 登录信息后，香港 preview 模型和 API 已部署开启，手机开关已打开并直接使用香港后端；本场转写和 Mac 收音持续保留。无需测试 APK 即已从当前手机实际看到实时姓名预览、定稿试验分段、Jev 辅助提示及疑似重叠提示；截图 .local-backend/diagnostics/speaker-preview-enabled-phone.png，手机滚动日志 speaker-preview-phone-live.log，服务器对应日志 speaker-preview-cloud-phone.log，公网工程音频报告 speaker-preview-cloud-smoke.json。这里验证的是功能和数据流；此前测试 APK 自动安装受限的记录仍属实，未宣称完成该项自动测试，也未把现场显示当作准确率真值。

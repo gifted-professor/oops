@@ -20,6 +20,7 @@ import datetime as dt
 import difflib
 import glob
 import hashlib
+import hmac
 import json
 import math
 import os
@@ -35,11 +36,14 @@ import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from zoneinfo import ZoneInfo
+from voiceprint_registry import VoiceprintRegistry, audio_quality
+from voiceprint_invites import invite_person
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TEAM = ["Jason", "黄丽萍", "江古月", "洪玉麟", "林春源"]
-ALIASES = {"Jason": "Jason", "黄丽萍": "黄丽萍", "丽萍": "黄丽萍", "江古月": "江古月",
-           "古月": "江古月", "洪玉麟": "洪玉麟", "玉麟": "洪玉麟", "林春源": "林春源", "春源": "林春源"}
+TEAM = ["黄丽萍", "江古月", "洪玉麟", "林春源"]
+ALIASES = {"黄丽萍": "黄丽萍", "丽萍": "黄丽萍", "江古月": "江古月",
+           "古月": "江古月", "洪玉麟": "洪玉麟", "玉麟": "洪玉麟", "林春源": "林春源", "春源": "林春源",
+           "Lydia": "黄丽萍", "lydia": "黄丽萍"}
 TAGS = {"commitment", "decision", "idea", "constraint", "chitchat", "uncertain"}
 TAG_LABELS = {"commitment": "承诺/指派", "decision": "决定", "idea": "想法", "constraint": "约束",
               "chitchat": "寒暄"}
@@ -60,7 +64,7 @@ SELF_COMMIT = re.compile(r"我(?:来|会|负责|[^，。！？,!?；;]{0,12})" +
 ASSIGN_YOU = re.compile(r"你(?:来|[^，。！？,!?；;]{0,12}(?:前|把))[^，。！？,!?；;]{0,8}" + ACTION)
 NON_COMMIT = re.compile(r"[？?]|不是|不要|不用|不必|不能|不想|不会|不负责|来不了|没法|无法|没(?:有)?(?:做|写|交|发)|"
                         r"已经|已(?:经)?(?:做|写|交|发|完成|提交)|昨天|之前|上周|如果|假如|要是|觉得|认为|建议|"
-                        r"(?:他|她|他们|她们|玉麟|春源|古月|丽萍|Jason).{0,4}(?:说|表示)|[“”\"「」『』]")
+                        r"(?:他|她|他们|她们|玉麟|春源|古月|丽萍|Jason|[Ll]ydia).{0,4}(?:说|表示)|[“”\"「」『』]")
 
 
 def commitment_evidence(text):
@@ -304,7 +308,8 @@ def jev_recall(jev, req):
 
 
 def jev_owner(jev, main, context):
-    criteria = {f"p{i}": f"原话明确点名由 {name} 负责；仅是收件人、被提到或被否定的对象不算" for i, name in enumerate(TEAM)}
+    criteria = {f"p{i}": f"原话明确点名由 {name} 负责（称呼：{'、'.join(a for a, n in ALIASES.items() if n == name)}）；"
+                "仅是收件人、被提到或被否定的对象不算" for i, name in enumerate(TEAM)}
     criteria["self"] = "说话人自己承诺，如我来做；不猜说话人姓名"
     criteria["unknown"] = "没有明确承诺/指派、存在多个行动/负责人、否定、引用、疑问、已经完成或无法确定"
     answer, _ = jev.choice(
@@ -434,6 +439,8 @@ class People:
             return open_id, None
         if who == me["name"]:
             return me["open_id"], None
+        if os.environ.get("OOPS_STRICT_PEOPLE") == "1":
+            raise LarkError("负责人未配置，请重新选择已核实的组织成员")
         return me["open_id"], f"原定负责人「{who}」不在飞书通讯录里，暂由 {me['name']} 跟进"
 
 
@@ -463,44 +470,96 @@ def resolve_people(lark, path):
 class Speakers:
     """Who is speaking, from models/voiceprint/enrolled.json (run with .venv-voice for sherpa-onnx)."""
 
-    def __init__(self, accept, margin):
+    def __init__(self, accept, margin, registry_path=None):
         self.accept, self.margin, self.ready, self.error = accept, margin, False, None
+        self.lock = threading.RLock()
         try:
             import numpy
             import sherpa_onnx
-            data = json.load(open(os.path.join(ROOT, "models", "voiceprint", "enrolled.json"), encoding="utf-8"))
+            seed = os.path.join(ROOT, "models", "voiceprint", "enrolled.json")
+            self.registry = VoiceprintRegistry(registry_path or os.path.join(ROOT, ".local-backend", "voiceprints.json"), seed, TEAM)
             self.np = numpy
-            self.names = list(data["people"])
-            matrix = numpy.array([data["people"][n]["vector"] for n in self.names], dtype="float32")
-            self.matrix = matrix / numpy.linalg.norm(matrix, axis=1, keepdims=True)
             self.extractor = sherpa_onnx.SpeakerEmbeddingExtractor(sherpa_onnx.SpeakerEmbeddingExtractorConfig(
                 model=os.path.join(ROOT, "models", "campplus_zh.onnx"), num_threads=2))
-            self.lock = threading.Lock()
+            self.reload()
             self.ready = True
-        except Exception as e:  # noqa: BLE001 — speaker ID is optional
+        except Exception as e:
             self.error = f"{type(e).__name__}: {e}"
 
-    def scores(self, pcm):
-        """All enrolled-speaker similarities; extractor calls are serialized, logic is pure below."""
-        np = self.np
-        samples = np.frombuffer(pcm, dtype="<i2").astype("float32") / 32768
+    def reload(self):
+        self.names = list(self.registry.data["people"])
+        vectors = [self.registry.data["people"][n]["vector"] for n in self.names]
+        self.matrix = self.np.array(vectors, dtype="float32") if vectors else self.np.empty((0, self.registry.dimension))
+        if vectors:
+            self.matrix /= self.np.linalg.norm(self.matrix, axis=1, keepdims=True)
+
+    def embedding(self, pcm):
+        samples = self.np.frombuffer(pcm, dtype="<i2").astype("float32") / 32768
         with self.lock:
             stream = self.extractor.create_stream()
             stream.accept_waveform(16000, samples)
             stream.input_finished()
             if not self.extractor.is_ready(stream):
+                raise ValueError("有效声音不足，请靠近麦克风朗读")
+            v = self.np.array(self.extractor.compute(stream), dtype="float32")
+        return v / (self.np.linalg.norm(v) + 1e-9)
+
+    def scores(self, pcm):
+        with self.lock:
+            if not self.names:
+                return []
+            try:
+                return (self.matrix @ self.embedding(pcm)).tolist()
+            except ValueError:
                 return [0.0] * len(self.names)
-            v = np.array(self.extractor.compute(stream), dtype="float32")
-        return (self.matrix @ (v / (np.linalg.norm(v) + 1e-9))).tolist()
 
     def identify(self, pcm):
-        """(name or None, best score, runner-up score) for 16 kHz mono s16le audio."""
-        sims = self.np.array(self.scores(pcm))
-        order = sims.argsort()[::-1]
-        best = float(sims[order[0]])
-        second = float(sims[order[1]]) if len(order) > 1 else 0.0
-        name = self.names[order[0]] if best >= self.accept and best - second >= self.margin else None
-        return name, best, second
+        with self.lock:
+            sims = self.np.array(self.scores(pcm))
+            if not len(sims):
+                return None, 0.0, 0.0
+            order = sims.argsort()[::-1]
+            best = float(sims[order[0]])
+            second = float(sims[order[1]]) if len(order) > 1 else 0.0
+            name = self.names[order[0]] if best >= self.accept and best - second >= self.margin else None
+            return name, best, second
+
+    def diagnose(self, pcm):
+        with self.lock:
+            values = sorted(zip(self.names, self.scores(pcm)), key=lambda x: -x[1])
+            best = values[0][1] if values else 0.0
+            second = values[1][1] if len(values) > 1 else 0.0
+            accepted = bool(values) and best >= self.accept and best - second >= self.margin
+            reason = "通过当前门槛" if accepted else "没有已注册声纹" if not values else \
+                "相似度未达到门槛" if best < self.accept else "前两名太接近，无法确定"
+            return {"speaker": values[0][0] if accepted else None, "closest": values[0][0] if values else None,
+                    "score": round(best, 3), "margin": round(best - second, 3), "reason": reason,
+                    "scores": [{"name": n, "score": round(v, 3)} for n, v in values],
+                    "accept": self.accept, "required_margin": self.margin, "quality": audio_quality(pcm)}
+
+    def enroll(self, req, pcm):
+        quality = audio_quality(pcm)
+        if not 15 <= quality["seconds"] <= 30 or quality["active_seconds"] < 8:
+            raise ValueError("请录满至少 15 秒，并清晰朗读至少 8 秒；建议按提示录满 30 秒")
+        if quality["clipped_ratio"] > .01:
+            raise ValueError("录音音量过大，请稍微远离麦克风后重录")
+        vectors = []
+        for offset in range(0, len(pcm) - 3 * 32000 + 1, 3 * 32000):
+            chunk = pcm[offset:offset + 3 * 32000]
+            if audio_quality(chunk)["active_seconds"] >= 1:
+                vectors.append(self.embedding(chunk))
+        if len(vectors) < 3:
+            raise ValueError("有效朗读片段不足，请保持自然音量连续朗读")
+        centroid = self.np.array(vectors).mean(axis=0)
+        centroid /= self.np.linalg.norm(centroid) + 1e-9
+        agreement = self.np.array(vectors) @ centroid
+        if float(self.np.median(agreement)) < .6 or float(self.np.min(agreement)) < .35:
+            raise ValueError("声音片段差异较大，请在安静环境中仅由本人重新朗读")
+        with self.lock:
+            result = self.registry.save(req["name"], centroid.tolist(), quality, req["source"],
+                                        req["sample_id"], req.get("expected_revision"), req.get("expected_profile_revision"))
+            self.reload()
+            return dict(result, quality=quality)
 
     def split(self, pcm, text, words, clip_start_ms, context=(), jev=None, config=None):
         config = config or {}
@@ -738,6 +797,7 @@ def split_fingerprints():
     roots = {"scripts/local_backend.py": {"Speakers", "viterbi_speakers", "voiceprint_decision", "align_words",
              "adjudicate_segments", "commitment_evidence", "self_owner", "resolve_owner", "jev_owner", "Jev",
              "load_split_validation", "TEAM"},
+             "scripts/voiceprint_registry.py": {"VoiceprintRegistry", "audio_quality"},
              "scripts/voiceprint_split.py": {"metrics", "gates", "gold_segments", "validated_truth", "evaluate"}}
     result = {}
     for name, decisions in roots.items():
@@ -825,15 +885,24 @@ class Backend:
         self.args = args
         self.jev = load_jev(args)
         self.lark = lark_cli_path(args.lark_cli)
-        state = os.path.join(ROOT, ".local-backend")
+        state = args.state_dir
         self.people = People(os.path.join(state, "people.json"))
         self.ops = Operations(os.path.join(state, "operations"))
-        self.speakers = Speakers(args.speaker_accept, args.speaker_margin)
+        self.speakers = Speakers(args.speaker_accept, args.speaker_margin, os.path.join(state, "voiceprints.json"))
+        self.speaker_preview, self.preview_error = None, None
+        if getattr(args, 'speaker_preview', False) and self.speakers.ready:
+            try:
+                from speaker_preview import SpeakerPreview
+                self.speaker_preview = SpeakerPreview(os.path.join(ROOT, 'models',
+                    'sherpa-onnx-pyannote-segmentation-3-0', 'model.onnx'), self.speakers)
+            except Exception as error:
+                self.preview_error = type(error).__name__
+                log('说话人试验预览加载失败：' + self.preview_error)
         self.tags = TagCache()
         self.split_config = None
         self.self_owner_enabled = False
         validation_path = os.path.join(ROOT, getattr(args, "split_validation", "models/voiceprint/split-validation.json"))
-        if os.path.isfile(validation_path):
+        if os.path.isfile(validation_path) and not os.path.isfile(self.speakers.registry.path if self.speakers.ready else os.path.join(state, "voiceprints.json")):
             validated = load_split_validation(validation_path)
             if validated:
                 self.split_config, self.self_owner_enabled = validated
@@ -872,6 +941,12 @@ class Backend:
         name, best, second = self.speakers.identify(pcm)
         result = {"utterance_id": req.get("utterance_id"), "speaker": name, "score": round(best, 3),
                   "runner_up": round(second, 3), "engine": "campplus-zh", "segments": [], "segments_validated": False}
+        if req.get('preview') is True and self.speaker_preview and isinstance(req.get('clip_start_ms'), int):
+            try:
+                result['preview'] = self.speaker_preview.analyze(pcm, req['clip_start_ms'], req.get('text', ''),
+                    req.get('words') or [], align_words, req.get('context') or [], self.jev, req.get('clip_end_ms'))
+            except Exception as error:
+                log('说话人试验预览失败：' + type(error).__name__)
         if self.split_config and req.get("text") and req.get("words"):
             if not isinstance(req.get("clip_start_ms"), int) or req["clip_start_ms"] < 0 or not isinstance(req["words"], list):
                 raise ApiError(400, "BAD_REQUEST", "需要会话坐标 clip_start_ms 和 words")
@@ -882,6 +957,56 @@ class Backend:
             primary = max(totals, key=totals.get) if any(totals.values()) else None
             result.update(speaker=primary, segments=segments, segments_validated=True)
         return result
+
+    def preview_speakers(self, req):
+        if not self.speaker_preview:
+            raise ApiError(501, 'SPEAKER_PREVIEW_UNAVAILABLE', '服务器尚未启用说话人试验预览')
+        try:
+            pcm = base64.b64decode(req.get('pcm_base64') or '', validate=True)
+            start = req.get('clip_start_ms')
+            final = isinstance(req.get('text'), str) and bool(req.get('text'))
+            minimum, maximum = (16000, 30 * 32000) if final else (3 * 32000, 10 * 32000)
+            if req.get('sample_rate') != 16000 or not minimum <= len(pcm) <= maximum or len(pcm) % 2 \
+                    or type(start) is not int or start < 0:
+                raise ValueError('需要 3–10 秒的 16 kHz 单声道音频及非负时间坐标')
+            return self.speaker_preview.analyze(pcm, start, req.get('text', ''), req.get('words') or [],
+                align_words, req.get('context') or [], self.jev if final else None, req.get('clip_end_ms'))
+        except ValueError as error:
+            raise ApiError(400, 'BAD_REQUEST', str(error)) from None
+
+    def voiceprint_catalog(self):
+        if not self.speakers.ready:
+            raise ApiError(501, "VOICEPRINT_UNAVAILABLE", "服务器声纹模型尚未就绪")
+        return dict(self.speakers.registry.catalog(), accept=self.speakers.accept, required_margin=self.speakers.margin)
+
+    def voiceprint_manage(self, req, action):
+        self.voiceprint_catalog()
+        try:
+            if action == "delete":
+                if req.get("confirm") is not True:
+                    raise ValueError("请先确认删除此人的声纹")
+                with self.speakers.lock:
+                    result = self.speakers.registry.delete(req.get("name"), req.get("expected_revision"))
+                    self.speakers.reload()
+            else:
+                if req.get("sample_rate") != 16000:
+                    raise ValueError("需要 16 kHz 单声道音频")
+                pcm = base64.b64decode(req.get("pcm_base64") or "", validate=True)
+                if not 16000 <= len(pcm) <= 30 * 32000 or len(pcm) % 2:
+                    raise ValueError("需要 0.5–30 秒的有效录音")
+                if action == "test":
+                    return self.speakers.diagnose(pcm)
+                if req.get("consent") is not True or req.get("single_speaker") is not True:
+                    raise ValueError("请由本人同意并确认录音仅包含本人声音")
+                if req.get("name") not in TEAM or req.get("source") not in ("mic", "remote"):
+                    raise ValueError("请选择团队成员，使用手机或外接麦克风现场录入")
+                if not isinstance(req.get("sample_id"), str) or not re.fullmatch(r"[A-Za-z0-9_-]{8,100}", req["sample_id"]):
+                    raise ValueError("录音编号无效")
+                result = self.speakers.enroll(req, pcm)
+            self.split_config, self.self_owner_enabled = None, False
+            return result
+        except (ValueError, KeyError) as e:
+            raise ApiError(400, "VOICEPRINT_RECORDING_INVALID", str(e)) from None
 
     # recall / draft
 
@@ -1018,6 +1143,12 @@ class Backend:
 
 class Handler(BaseHTTPRequestHandler):
     backend: Backend = None
+    api_token = ""
+    enroll_secret = ""
+
+    def setup(self):
+        super().setup()
+        self.connection.settimeout(15)
 
     def log_message(self, *_):
         pass
@@ -1027,6 +1158,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(payload)
 
@@ -1034,7 +1166,24 @@ class Handler(BaseHTTPRequestHandler):
         started = time.monotonic()
         status, summary = 200, ""
         try:
-            if method == "POST":
+            authorization = self.headers.get("Authorization", "")
+            person = invite_person(self.enroll_secret, authorization.removeprefix("Bearer "), TEAM)
+            full_access = not self.api_token or hmac.compare_digest(authorization.encode(), ("Bearer " + self.api_token).encode())
+            if not full_access and not person:
+                raise ApiError(401, "UNAUTHORIZED", "服务访问凭据无效")
+            if not full_access and not ((method == "GET" and self.path == "/v1/voiceprints") or
+                    (method == "POST" and self.path in ("/v1/voiceprints/enroll", "/v1/voiceprints/test"))):
+                raise ApiError(403, "FORBIDDEN", "此链接仅用于本人的声纹录入与测试")
+            if method == "GET" and self.path == "/healthz":
+                value = {"status": "ok", "jev": self.backend.jev is not None,
+                         "voiceprint": self.backend.speakers.ready, "feishu": self.backend.args.feishu,
+                         "speaker_preview": getattr(self.backend, 'speaker_preview', None) is not None,
+                         "segments_validated": self.backend.split_config is not None}
+                summary = "health"
+            elif method == "GET" and self.path == "/v1/voiceprints":
+                value = self.backend.voiceprint_catalog()
+                summary = "voiceprint catalog"
+            elif method == "POST":
                 size = int(self.headers.get("Content-Length") or 0)
                 if not 0 < size <= 2_000_000:  # 30 s PCM is 1.28 MB once base64 encoded
                     raise ApiError(400, "BAD_REQUEST", "请求体为空或过大")
@@ -1042,12 +1191,22 @@ class Handler(BaseHTTPRequestHandler):
                     body = json.loads(self.rfile.read(size))
                 except json.JSONDecodeError:
                     raise ApiError(400, "BAD_REQUEST", "请求不是合法 JSON") from None
-                if self.path == "/v1/recall":
+                if not isinstance(body, dict):
+                    raise ApiError(400, "BAD_REQUEST", "请求必须是 JSON 对象")
+                if not full_access and self.path == "/v1/voiceprints/enroll" and body.get("name") != person:
+                    raise ApiError(403, "FORBIDDEN", "此链接只能更新本人声纹")
+                if self.path in ("/v1/voiceprints/enroll", "/v1/voiceprints/test", "/v1/voiceprints/delete"):
+                    value = self.backend.voiceprint_manage(body, self.path.rsplit("/", 1)[1])
+                    summary = "voiceprint " + self.path.rsplit("/", 1)[1]
+                elif self.path == "/v1/recall":
                     value = self.backend.recall(body)
                     summary = f"engine={value['engine']} picks={len(value['picks'])}"
                 elif self.path == "/v1/speaker":
                     value = self.backend.speaker(body)
                     summary = f"speaker={value['speaker']} score={value['score']}"
+                elif self.path == '/v1/speaker-preview':
+                    value = self.backend.preview_speakers(body)
+                    summary = f"experimental activities={len(value['activities'])} compute_ms={value['compute_ms']}"
                 elif self.path == "/v1/utterances":
                     value = self.backend.tag(body)
                     summary = f"tag={value['tag']} engine={value['engine']}"
@@ -1070,6 +1229,8 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:  # noqa: BLE001
             status, value = 500, {"error": {"code": "INTERNAL", "message": "本地后端出错"}}
             summary = type(e).__name__
+        if status == 200 and person and not full_access and "people" in value:
+            value = dict(value, person=person, people=[p for p in value["people"] if p["name"] == person])
         self.reply(status, value)
         log(f"{method} {self.path} {status} {int((time.monotonic() - started) * 1000)}ms {summary}")
 
@@ -1077,6 +1238,29 @@ class Handler(BaseHTTPRequestHandler):
         self.handle_call("POST")
 
     def do_GET(self):
+        if self.path == "/voiceprint":
+            self.send_response(307)
+            self.send_header("Location", "voiceprint/")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        if self.path in ("/voiceprint/", "/voiceprint/enroll.css", "/voiceprint/enroll.js", "/voiceprint/audio.js"):
+            name = {"/voiceprint": "index.html", "/voiceprint/": "index.html",
+                    "/voiceprint/enroll.css": "enroll.css", "/voiceprint/enroll.js": "enroll.js", "/voiceprint/audio.js": "audio.js"}[self.path]
+            with open(os.path.join(ROOT, "web", "voiceprint", name), "rb") as f:
+                payload = f.read()
+            self.send_response(200)
+            self.send_header("Content-Type", {"index.html": "text/html; charset=utf-8", "enroll.js": "text/javascript; charset=utf-8", "audio.js": "text/javascript; charset=utf-8",
+                                              "enroll.css": "text/css; charset=utf-8"}[name])
+            self.send_header("Content-Length", str(len(payload)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Permissions-Policy", "microphone=(self)")
+            self.send_header("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'")
+            self.end_headers()
+            self.wfile.write(payload)
+            return
         self.handle_call("GET")
 
 
@@ -1169,6 +1353,8 @@ def self_test():
 def main():
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--port", type=int, default=8787)
+    p.add_argument("--state-dir", default=os.path.join(ROOT, ".local-backend"),
+                   help="持久化人员映射和确认操作记录的目录")
     p.add_argument("--feishu", choices=["live", "dry-run"], default="live")
     p.add_argument("--jev-env", default=".jev.env")
     p.add_argument("--jev-model", default="jev-latest")
@@ -1176,6 +1362,8 @@ def main():
     p.add_argument("--lark-cli", help="lark-cli 路径")
     p.add_argument("--speaker-accept", type=float, default=0.5, help="声纹相似度低于此值判为未知")
     p.add_argument("--speaker-margin", type=float, default=0.05, help="第一名需领先第二名的相似度")
+    p.add_argument('--speaker-preview', action='store_true', default=os.environ.get('OOPS_SPEAKER_PREVIEW') == '1',
+                   help='启用实时换人/重叠试验预览；不改变正式分段与负责人验收状态')
     p.add_argument("--split-validation", default="models/voiceprint/split-validation.json",
                    help="split-eval 生成的独立验收结果；未通过时保持整句识别和关闭 self 自动填人")
     p.add_argument("--resolve-people", action="store_true", help="在飞书通讯录里匹配团队成员并写入映射")
@@ -1184,7 +1372,7 @@ def main():
     if args.self_test:
         return self_test()
     if args.resolve_people:
-        return resolve_people(lark_cli_path(args.lark_cli), os.path.join(ROOT, ".local-backend", "people.json"))
+        return resolve_people(lark_cli_path(args.lark_cli), os.path.join(args.state_dir, "people.json"))
 
     backend = Backend(args)
     if not backend.people.data:
@@ -1192,6 +1380,8 @@ def main():
         resolve_people(backend.lark, backend.people.path)
         backend.people = People(backend.people.path)
     Handler.backend = backend
+    Handler.api_token = os.environ.get("OOPS_API_TOKEN", "").strip()
+    Handler.enroll_secret = os.environ.get("OOPS_ENROLL_SECRET", "").strip()
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     people = backend.people.data
     mapped = ", ".join(name for name, open_id in people["people"].items() if open_id) or "无"

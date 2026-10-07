@@ -17,10 +17,30 @@ class Settings(context: Context) {
         get() = prefs.getString(KEY_URL, null) ?: BuildConfig.BACKEND_BASE_URL
         set(value) = prefs.edit { putString(KEY_URL, value.trim()) }
 
+    /** Credentials belong to one endpoint; pending operations never use another server's token. */
+    fun backendTokenFor(url: String): String = prefs.getString("backend_token:${url.trim().trimEnd('/')}", "").orEmpty()
+
+    fun setBackendTokenFor(url: String, value: String) = prefs.edit {
+        putString("backend_token:${url.trim().trimEnd('/')}", value.trim())
+    }
+
+    var backendToken: String
+        get() = backendTokenFor(backendBaseUrl)
+        set(value) = prefs.edit { putString("backend_token:${backendBaseUrl.trim().trimEnd('/')}", value.trim()) }
+
     /** Off by default — see VolcRequest. */
     var speakerInfo: Boolean
         get() = prefs.getBoolean(KEY_SPEAKER, false)
         set(value) = prefs.edit { putBoolean(KEY_SPEAKER, value) }
+
+    var speakerPreview: Boolean
+        get() = prefs.getBoolean("speaker_preview", false)
+        set(value) = prefs.edit { putBoolean("speaker_preview", value) }
+
+    /** Optional debug-only analysis service; business calls keep their normal backend. */
+    var speakerPreviewUrl: String
+        get() = prefs.getString("speaker_preview_url", "").orEmpty()
+        set(value) = prefs.edit { putString("speaker_preview_url", value.trim()) }
 
     var source: String
         get() = prefs.getString(KEY_SOURCE, SOURCE_MIC) ?: SOURCE_MIC
@@ -61,8 +81,8 @@ class Settings(context: Context) {
         }
 
         /** 预置团队成员（24h 原型：负责人从这里选，不接飞书通讯录）。Also used as ASR hotwords. */
-        val TEAM = listOf("Jason", "黄丽萍", "江古月", "洪玉麟", "林春源")
-        val HOTWORDS = listOf("Oops", "欧普斯") + TEAM
+        val TEAM = listOf("黄丽萍", "江古月", "洪玉麟", "林春源")
+        val HOTWORDS = listOf("Oops", "欧普斯", "Lydia") + TEAM
 
         private const val KEY_MOCK = "mock_backend"
         private const val KEY_URL = "backend_base_url"

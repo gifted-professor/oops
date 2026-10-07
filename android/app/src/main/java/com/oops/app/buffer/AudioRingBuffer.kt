@@ -89,6 +89,14 @@ class AudioRingBuffer(val capacitySamples: Int) {
         return from to read(from, to)!!
     }
 
+    /** ASR endpoints can be a few samples past the final frame; never borrow expired audio. */
+    @Synchronized
+    fun readWithEndTolerance(fromSample: Long, toSample: Long, toleranceSamples: Long): ByteArray? {
+        require(toleranceSamples >= 0)
+        if (fromSample < startSample || toSample <= fromSample || toSample - end > toleranceSamples) return null
+        return read(fromSample, minOf(toSample, end))
+    }
+
     @Synchronized
     fun reset() {
         end = 0

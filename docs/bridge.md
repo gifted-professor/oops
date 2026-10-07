@@ -8,7 +8,7 @@ H5 用 `window.OopsNative.postMessage(JSON.stringify({type,payload}))` 发送；
 | type | payload | 行为 |
 |---|---|---|
 | hello | {} | 请求完整 snapshot |
-| capture.start | {source?:"mic"或"wav"} | 请求权限并启动前台收音服务 |
+| capture.start | {source?:"mic"或"wav"或"remote"} | 请求权限并启动前台收音服务 |
 | capture.stop | {} | 停止服务及收音 |
 | recall.trigger | {query?:string} | 按钮召回 |
 | clip.play | {key,startMs,endMs} | 回听缓存原声；key 标识按钮 |
@@ -20,7 +20,7 @@ H5 用 `window.OopsNative.postMessage(JSON.stringify({type,payload}))` 发送；
 | action.draft | {cardId,utteranceIds} | 请求行动草稿，不写入飞书 |
 | action.confirm | {draftId,who,what,whenIso,whenRaw,constraint} | 冻结草稿、持久化 op_id、提交确认 |
 | action.status | {draftId} | 查询原操作，不重新提交 |
-| settings.set | {source,mockBackend,backendBaseUrl,speakerInfo} | 修改调试设置 |
+| settings.set | {source,remoteAddress,mockBackend,backendBaseUrl,backendToken?,speakerInfo} | 保存；收音中切换音源/远端音频地址立即生效，保留本场缓存 |
 | testAudio.pick | {} | 系统文件选择器导入 WAV，持久保留读取权限 |
 | testAudio.reset | {} | 恢复内置合成对话 |
 | open.url | {url} | 系统打开 HTTP(S) 链接 |
@@ -31,7 +31,7 @@ H5 用 `window.OopsNative.postMessage(JSON.stringify({type,payload}))` 发送；
 | type | payload |
 |---|---|
 | snapshot | {state,transcript,summary,team,insets,pendingActions:[{draft,result}]} |
-| state | {capturing,sessionId,source,sessionMs,bufferedMs,retentionMs,asr,asrDetail,level,playing,savedCount,backend,backendUrl,speakerInfo,testWavName,asrGaps,commitmentCount,analysisPending,analysisFailed,tagsSupported,sessionTruncated} |
+| state | {capturing,sessionId,source,sourceReady,sourceDetail,sessionMs,bufferedMs,retentionMs,asr,asrDetail,level,playing,savedCount,backend,backendUrl,speakerInfo,testWavName,asrGaps,commitmentCount,analysisPending,analysisFailed,tagsSupported,sessionTruncated} |
 | insets | {top,bottom} CSS 像素 |
 | asr.partial | {text,startMs,endMs} |
 | asr.final | {id,text,startMs,endMs,speaker} |
@@ -62,3 +62,29 @@ evidence 为 {utteranceIds,quote,startMs,endMs}。所有时间是会话毫秒。
 
 bridge-mock.js 只有在原生桥不存在时安装模拟桥，使用 dialog.wav 的句子时间轴，提供 partial/final、两种召回卡片、真实 WAV 回听、localStorage 保存、草稿和复用 op_id 的 pending→created。页面显示“浏览器模拟识别”，所有调用均留在本地。
 启动 `python3 -m http.server 8765 --bind 127.0.0.1 --directory android/app/src/main/assets`，进入 `/web/index.html`；测试音频通过 `/test/dialog.wav` 提供。无需前端构建。
+
+`sourceReady` 表示音源已经交付 PCM，且尚未断开。Mac 重连或切换音源时为 false，收到音频后为 true；UI 在 false 时显示「等待收音／等待音源」，不会只因 ASR socket 连接就宣称实时识别。旧音源的状态、音频、错误和标记回调均按具体音源实例过滤，不能影响已切换的新音源。
+
+
+## App 自助声纹录入
+
+- `voiceprint.list {}`：鉴权获取成员和目录版本。
+- `voiceprint.record {name,consent:true,mode:"enroll"|"test"}`：本人同意后，冻结服务客户端与当前音源，录入最多 30 秒／测试最多 10 秒。若未收音，原生请求权限并启用手机麦克风。WAV 音源不能注册。
+- `voiceprint.stop {}`：结束录音；录入达到 15 秒后先只读检查音量，测试录音自动匹配。
+- `voiceprint.save {}`：质量通过后明确提交保存；保留 sample_id 实现响应丢失后的幂等重试。
+- `voiceprint.cancel {}`：清除尚未提交的临时录音，日常收音继续。
+- `voiceprint.delete {name,confirm:true}`：再次确认后按目录版本删除。
+
+`state.voiceprint` 含 `phase/name/mode/elapsedMs/source/message/catalog/diagnosis/quality/qualityPassed`；阶段为 idle/loading/recording/checking/review/saving/testing。H5 不获得任何服务访问凭据或 PCM。浏览器 mock 明确不支持录入，不生成虚假声纹。关闭页、停止收音、切换音源或服务器均放弃临时录音；已经提交的保存可能在服务器完成，取消界面不能撤销在途写入。
+
+原生临时声纹缓冲最多 30 秒；没有额外写录音文件。App 正常会话音频仍按既有环形缓存和明确保存规则处理。
+
+
+### 每句声纹判断状态
+
+定稿句、snapshot 和 asr.tag 增加 speakerState/speakerScore。asr.speaker 增加 speakerState；score 可为 null（没有完成模型计算）。状态有 pending/matched/unconfirmed/too_short/busy/audio_unavailable/unsupported/error。matched 显示已匹配姓名；unconfirmed 显示“声纹未确认”及最高相似度；其他状态显示对应原因。unknown 状态不填候选姓名，也不绕过负责人验收。标签异步更新和页面重载保留已完成的声纹状态。
+
+
+## 说话人拆分试验（2026-10-07）
+
+settings.set 增加 `speakerPreview`，默认 false；state 增加 `speakerPreviewEnabled/liveSpeakerStatus/liveSpeakers/liveOverlap`。定稿句及 asr.speaker 增加单独 `speakerPreview:{experimental,startMs,endMs,activities,segments,jevUsed}`，内部字段使用 camelCase。H5 开关显示「实时换人拆分与重叠提示（试验）」；滚动提示身份候选/待确认/疑似多人同时说话，定稿按原文词时间显示试验分段。Jev 辅助姓名标为待核对。刷新及开关切换保留试验数据并重新渲染，不写入正式 segments、Candidate 或行动草稿。

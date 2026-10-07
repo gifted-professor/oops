@@ -38,6 +38,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var bridge: WebBridge
     private var insets = JSONObject().put("top", 0).put("bottom", 0)
     private var pendingSource: String? = null
+    private var pendingVoiceprintPage = false
 
     private val permissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
@@ -46,6 +47,7 @@ class MainActivity : ComponentActivity() {
             if (hasPermission(Manifest.permission.RECORD_AUDIO)) {
                 CaptureService.start(this, source)
             } else {
+                OopsEngine.cancelVoiceprintRecording()
                 bridge.send("error", JSONObject().put("scope", "permission").put("message", "需要麦克风权限才能收音"))
             }
         }
@@ -159,6 +161,11 @@ class MainActivity : ComponentActivity() {
                 }
                 requestCapture(intent.getStringExtra(EXTRA_SOURCE) ?: OopsEngine.settings.source)
             }
+            ACTION_DEBUG_VOICEPRINT -> if (BuildConfig.DEBUG) {
+                pendingVoiceprintPage = true
+                bridge.send("voiceprint.open")
+                OopsEngine.loadVoiceprints()
+            }
             ACTION_DEBUG_STOP -> if (BuildConfig.DEBUG) CaptureService.stop(this)
         }
     }
@@ -166,7 +173,8 @@ class MainActivity : ComponentActivity() {
     private fun onBridgeMessage(type: String, p: JSONObject) {
         try {
             when (type) {
-                "hello" -> bridge.send(
+                "hello" -> {
+                    bridge.send(
                     "snapshot",
                     JSONObject()
                         .put("state", BridgeJson.state(OopsEngine.state.value))
@@ -178,7 +186,12 @@ class MainActivity : ComponentActivity() {
                                 .put("result", BridgeJson.actionResult(draft.draftId, result))
                         }))
                         .put("insets", insets),
-                )
+                    )
+                    if (pendingVoiceprintPage) {
+                        pendingVoiceprintPage = false
+                        bridge.send("voiceprint.open")
+                    }
+                }
                 "capture.start" -> requestCapture(p.optString("source").ifBlank { OopsEngine.settings.source })
                 "capture.stop" -> CaptureService.stop(this)
                 "recall.trigger" -> OopsEngine.triggerRecall("button", p.optString("query").ifBlank { null })
@@ -202,6 +215,18 @@ class MainActivity : ComponentActivity() {
                 "action.status" -> OopsEngine.queryAction(p.getString("draftId"))
                 "testAudio.pick" -> audioPicker.launch(arrayOf("audio/wav", "audio/x-wav", "audio/*"))
                 "testAudio.reset" -> OopsEngine.selectTestWav("", "内置合成对话")
+                "voiceprint.list" -> OopsEngine.loadVoiceprints()
+                "voiceprint.record" -> {
+                    OopsEngine.beginVoiceprintRecording(p.optString("name"), p.optBoolean("consent"), p.optString("mode", "enroll"))
+                    if (!OopsEngine.state.value.capturing) requestCapture(Settings.SOURCE_MIC)
+                }
+                "voiceprint.stop" -> OopsEngine.finishVoiceprintRecording()
+                "voiceprint.save" -> OopsEngine.submitVoiceprintRecording()
+                "voiceprint.cancel" -> OopsEngine.cancelVoiceprintRecording()
+                "voiceprint.delete" -> {
+                    require(p.optBoolean("confirm")) { "请确认删除声纹" }
+                    OopsEngine.deleteVoiceprint(p.getString("name"))
+                }
                 "settings.set" -> OopsEngine.applySettings(p)
                 "open.url" -> openExternal(p.getString("url"))
                 "log" -> Log.d("OopsWeb", p.optString("message"))
@@ -241,6 +266,7 @@ class MainActivity : ComponentActivity() {
         private const val TAG = "Oops"
         const val ACTION_RECALL = "com.oops.app.action.RECALL"
         const val ACTION_DEBUG_START = "com.oops.app.action.DEBUG_START"
+        const val ACTION_DEBUG_VOICEPRINT = "com.oops.app.action.DEBUG_VOICEPRINT"
         const val ACTION_DEBUG_STOP = "com.oops.app.action.DEBUG_STOP"
         const val EXTRA_SOURCE = "source"
         const val EXTRA_QUERY = "query"

@@ -97,9 +97,9 @@ python3 scripts/device_stability.py --wav-path /data/user/0/com.oops.app/files/t
 
 见 `docs/api.md`：召回、草稿、确认和查询四接口，snake_case、会话毫秒、10 秒调用时限。草稿提供绝对参考时间和时区；后端负责显示名到飞书用户 ID 的映射。
 
-确认之前持久化 op_id 和冻结的内容；网络响应丢失或 pending 超时后继续查询原操作。未完成操作可在重开 App 时恢复。服务器幂等和未知写入结果的恢复仍需真实联调验收。
+确认之前持久化 op_id 和冻结的内容；网络响应丢失或 pending 超时后继续查询原操作。未完成操作可在重开 App 时恢复。服务器真实写入、同操作重复确认及后端重启后的查询已通过手机联调；网络切换与响应丢失场景的远程实测仍待补充。
 
-`飞书后端` 是处理这四个接口的 Oops 中间服务，不是 Jev 的 System One 接口。Jev 做候选选择；后端另外负责草稿、显示名到飞书用户 ID 的映射、飞书授权和任务读写。当前项目没有该服务地址或飞书应用凭据。
+`飞书后端` 是处理这四个接口的 Oops 中间服务，不是 Jev 的 System One 接口。Jev 做候选选择；后端另外负责草稿、显示名到飞书用户 ID 的映射、飞书授权和任务读写。当前服务器入口为 `https://giftedprofessor.xyz/oops-meeting`，服务器已授权新 Oops 飞书组织；应用凭据仅保存在服务器。
 
 仅测试 Jev 的真实 Choice 接口：
 ```sh
@@ -137,6 +137,16 @@ A：软件收尾＋USB 真机麦克风／WAV＋30 分钟运行。B：真实后�
 
 本机 HTTP 故障联调（不调用飞书）：`python3 scripts/local_api_fixture.py --scenario drop-response-once`，或 `--scenario reject-once`。手机使用 `adb reverse tcp:8766 tcp:8766`，在 App 设置填 `http://127.0.0.1:8766` 并关闭 Mock。前者模拟已创建但响应丢失；后者模拟未接收确认后失败。`/_test/operations` 可核对同一 op_id 的请求、次数与创建数。结束后恢复 Mock 并执行 `adb reverse --remove tcp:8766`。
 
+## 香港后端 + 手机独立收音
+
+Redmi 已安装当前 APK，后端地址 `https://giftedprofessor.xyz/oops-meeting`、Mock 关闭、服务访问凭据已配置。收音中在设置保存新音源会立即切换，并保留本场字幕与音频缓存。默认手机麦克风，可通过移动网络运行，不需要 Mac 后端或 USB 转发。App 设置可修改服务地址和访问凭据；凭据按地址保存，留空保留，勾选清除才删除。正式任务仍需检查草稿后明确确认。
+
+设置 →「声纹录入与匹配测试」可选择本人姓名、同意后按固定文本朗读 30 秒，检查时长/音量，再明确保存。支持手机麦克风和现场外接音源，WAV 测试音源不能注册。保存后用另一段文本录 10 秒核对匹配结果。
+
+团队也可使用服务器上的个人邀请链接，在手机 Safari/Chrome 直接录入，无需安装 App 或连接 Mac。录入页路径 `/oops-meeting/voiceprint/`；需使用发给本人的完整链接，每个邀请只能更新对应成员的声纹，不能操作飞书或删除声纹。请保持页面在前台。四人仍使用原 DJI 声纹，待本人录入后更新；识别准确率仍需真人验收。部署和邀请维护见 [服务器说明](docs/server-deployment.md)。
+
+服务器运行 Jev、声纹和独立授权的飞书 CLI。四人负责人是林春源、江古月、洪玉麟、黄丽萍；Lydia 对应黄丽萍。真实测试任务创建、回读、防重及后端重启后的查询已通过。句内拆分与 self 自动填负责人继续等待人工验收。部署路径、维护、回退与完整证据见 [服务器部署](docs/server-deployment.md)。
+
 ## Mac mini 收音 + 本地飞书后端
 
 手机插着 USB 调试时没法再接麦克风，所以把收音放到 Mac mini：Hollyland 无线麦接收器插在 Mac 上，`scripts/mac_audio_bridge.py` 用 ffmpeg 持续采集，转成 16 kHz 单声道 PCM，经 `adb reverse` 走 USB 推给 App 的「Mac 收音」音源（`RemoteAudioSource`）。它和以后的录音豆走同一条外接设备链路：断线自动重连并补缺口，回车 = 双击召回。
@@ -151,4 +161,7 @@ adb reverse tcp:8787 tcp:8787
 adb shell am start -n com.oops.app/.MainActivity -a com.oops.app.action.DEBUG_START \
   --es source remote --es remote 127.0.0.1:7790 --es backend http://127.0.0.1:8787 --ez mock false
 ```
-也可以在 App 调试设置里手动选「Mac 收音」、填后端地址并关闭 Mock。通讯录里找不到的负责人（如 Jason）建给授权用户本人，原定负责人写进任务描述。首次采集时 macOS 会请求麦克风权限。
+也可以在 App 调试设置里手动选「Mac 收音」、填后端地址并关闭 Mock。本地默认模式下缺失映射会回落给授权用户，并把原定负责人写入描述；服务器严格模式会直接拒绝未映射负责人。首次采集时 macOS 会请求麦克风权限。
+
+
+字幕说话人姓名在一句转写完成、服务器匹配通过后补上；未通过会显示“声纹未确认”及最高相似度。语音太短、请求失败或音频不可用也有独立提示。当前每句只给一个姓名，句内换人仍待独立拆分验收。声纹读取容忍最多 100 ms 的转写尾部时间误差，防止停录后末句因几毫秒越界被整段跳过；匹配阈值未降低。

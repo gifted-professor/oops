@@ -15,6 +15,11 @@ object BridgeJson {
     private val NULL = JSONObject.NULL
 
     fun state(s: EngineState): JSONObject = JSONObject()
+        .put("voiceprint", JSONObject().put("phase", s.voiceprint.phase).put("name", s.voiceprint.name)
+            .put("mode", s.voiceprint.mode).put("elapsedMs", s.voiceprint.elapsedMs).put("source", s.voiceprint.source)
+            .put("message", s.voiceprint.message).put("catalog", s.voiceprint.catalog ?: NULL)
+            .put("diagnosis", s.voiceprint.diagnosis ?: NULL).put("quality", s.voiceprint.quality ?: NULL)
+            .put("qualityPassed", s.voiceprint.qualityPassed))
         .put("capturing", s.capturing)
         .put("sessionId", s.sessionId)
         .put("source", s.source)
@@ -28,9 +33,13 @@ object BridgeJson {
         .put("savedCount", s.savedCount)
         .put("backend", s.backend)
         .put("backendUrl", s.backendUrl)
+        .put("hasBackendToken", s.hasBackendToken)
         .put("speakerInfo", s.speakerInfo)
+        .put("speakerPreviewEnabled", s.speakerPreviewEnabled).put("liveSpeakerStatus", s.liveSpeakerStatus ?: NULL)
+        .put("liveSpeakers", JSONArray(s.liveSpeakers)).put("liveOverlap", s.liveOverlap)
         .put("testWavName", s.testWavName)
         .put("sourceDetail", s.sourceDetail ?: NULL)
+        .put("sourceReady", s.sourceReady)
         .put("remoteAddress", s.remoteAddress)
         .put("asrGaps", JSONArray(s.asrGaps.map { JSONObject().put("fromMs", it.fromMs).put("toMs", it.toMs) }))
         .put("commitmentCount", s.commitmentCount).put("analysisPending", s.analysisPending)
@@ -43,6 +52,8 @@ object BridgeJson {
         .put("endMs", u.endMs)
         .put("text", u.text)
         .put("speaker", u.speaker ?: NULL)
+        .put("speakerState", u.speakerState ?: NULL).put("speakerScore", u.speakerScore ?: NULL)
+        .put("speakerPreview", u.speakerPreview?.let(::preview) ?: NULL)
         .put("tag", u.tag ?: NULL).put("tagProb", u.tagProb ?: NULL).put("tagEngine", u.tagEngine ?: NULL)
         .put("words", JSONArray(u.words.map { JSONObject().put("text", it.text).put("startMs", it.startMs).put("endMs", it.endMs) }))
         .put("segments", segments(u.segments))
@@ -111,7 +122,9 @@ object BridgeJson {
             "asr.partial" to JSONObject().put("text", e.text).put("startMs", e.startMs).put("endMs", e.endMs)
         is OopsEvent.Final -> "asr.final" to utterance(e.utterance)
         is OopsEvent.SpeakerIdentified ->
-            "asr.speaker" to JSONObject().put("id", e.utteranceId).put("speaker", e.speaker ?: NULL).put("score", e.score)
+            "asr.speaker" to JSONObject().put("id", e.utteranceId).put("speaker", e.speaker ?: NULL).put("score", e.score ?: NULL)
+                .put("speakerState", e.speakerState)
+                .put("speakerPreview", e.preview?.let(::preview) ?: NULL)
                 .put("segments", segments(e.segments))
         is OopsEvent.UtteranceTagged -> "asr.tag" to utterance(e.utterance)
         is OopsEvent.SessionSummary -> "session.summary" to summary(e)
@@ -129,4 +142,11 @@ object BridgeJson {
         is OopsEvent.Toast -> "toast" to JSONObject().put("message", e.message)
         is OopsEvent.Failure -> "error" to JSONObject().put("scope", e.scope).put("message", e.message)
     }
+
+    private fun preview(p: com.oops.app.buffer.SpeakerPreview): JSONObject = JSONObject()
+        .put("experimental", p.experimental).put("jevUsed", p.jevUsed)
+        .put("startMs", p.startMs).put("endMs", p.endMs)
+        .put("segments", JSONArray(p.segments.map { s -> JSONObject().put("startMs", s.startMs)
+            .put("endMs", s.endMs).put("text", s.text).put("speaker", s.speaker ?: NULL)
+            .put("score", s.score).put("kind", s.kind).put("source", s.source ?: NULL).put("approx", s.approx) }))
 }

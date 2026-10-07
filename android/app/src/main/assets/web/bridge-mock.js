@@ -17,7 +17,7 @@
   const state = { capturing: false, sessionId: '', source: 'wav', sessionMs: 0, bufferedMs: 0,
     retentionMs: 300000, asr: 'off', asrDetail: null, level: 0, playing: false,
     savedCount: saved.length, backend: 'mock', backendUrl: '', speakerInfo: false,
-    testWavName: '内置合成对话（浏览器模拟）', asrGaps: [], sourceDetail: null, remoteAddress: '127.0.0.1:7790' };
+    testWavName: '内置合成对话（浏览器模拟）', asrGaps: [], sourceDetail: null, sourceReady: false, remoteAddress: '127.0.0.1:7790' };
   const bridge = { onmessage: null, postMessage: (raw) => {
     try { const { type, payload = {} } = JSON.parse(raw); handle(type, payload); }
     catch (e) { emit('error', { scope: 'mock', message: e.message }); }
@@ -108,9 +108,9 @@
       case 'capture.start':
         if (state.capturing) break;
         stopClip();transcript = [];sessionTranscript = [];cards.clear();state.sessionId = id('session');
-        Object.assign(state, { capturing: true, sessionMs: 0, bufferedMs: 0, asr: 'simulated', commitmentCount: 0, analysisPending: 0, analysisFailed: 0, tagsSupported: null });
+        Object.assign(state, { capturing: true, sourceReady: true, sessionMs: 0, bufferedMs: 0, asr: 'simulated', commitmentCount: 0, analysisPending: 0, analysisFailed: 0, tagsSupported: null });
         startedAt = performance.now();emit('state', { ...state });clearInterval(timer);timer = setInterval(tick, 100);break;
-      case 'capture.stop': state.capturing = false;state.asr = 'off';state.level = 0;clearInterval(timer);stopClip();emit('state', { ...state });break;
+      case 'capture.stop': state.capturing = false;state.sourceReady = false;state.asr = 'off';state.level = 0;clearInterval(timer);stopClip();emit('state', { ...state });break;
       case 'recall.trigger': void recall(p);break;
       case 'commitment.open': {
         const u = sessionTranscript.find((u) => u.id === p.utteranceId && u.tag === 'commitment');
@@ -143,6 +143,13 @@
         const r = actions.get(draftOps.get(p.draftId));
         if (r) emit('action.result', r);else emit('action.result', { draftId: p.draftId, opId: draftOps.get(p.draftId), status: 'pending', polling: false, mock: true, message: '模拟操作仍在处理，请继续查询' });break;
       }
+      case 'voiceprint.list':
+      case 'voiceprint.record':
+      case 'voiceprint.save':
+      case 'voiceprint.delete':
+        state.voiceprint = {phase: 'idle', message: '浏览器不录入真实声纹，请在已连接服务器的 Android App 中使用'};
+        emit('state', {...state});break;
+      case 'voiceprint.cancel': break;
       case 'settings.set':
         state.source = p.source || state.source;state.backendUrl = p.backendBaseUrl || '';state.speakerInfo = !!p.speakerInfo;
         state.remoteAddress = p.remoteAddress || state.remoteAddress;

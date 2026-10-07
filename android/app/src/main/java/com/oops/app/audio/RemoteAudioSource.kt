@@ -52,6 +52,7 @@ class RemoteAudioSource(
     private fun loop(listener: AudioSource.Listener) {
         while (running) {
             try {
+                listener.onReady(false)
                 listener.onStatus("正在连接 Mac 收音 $host:$port")
                 Socket().use { s ->
                     socket = s
@@ -63,6 +64,7 @@ class RemoteAudioSource(
             } catch (e: Exception) {
                 if (!running) break
                 failures++
+                listener.onReady(false)
                 listener.onStatus("Mac 收音未连接，重试中（${e.message ?: e.javaClass.simpleName}）")
                 try {
                     Thread.sleep(minOf(retryBaseMs shl minOf(failures - 1, 4), MAX_RETRY_MS))

@@ -1,0 +1,26 @@
+[Unit]
+Description=Oops meeting backend (Jev, voiceprints, Feishu)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=oops
+Group=oops
+WorkingDirectory=/opt/oops/app
+Environment=HOME=/var/lib/oops
+Environment=PATH=/opt/oops/runtime/bin:/usr/bin:/bin
+Environment=LARKSUITE_CLI_NO_UPDATE_NOTIFIER=1
+Environment=LARKSUITE_CLI_NO_SKILLS_NOTIFIER=1
+EnvironmentFile=/var/lib/oops/backend.env
+ExecStart=/opt/oops/venv/bin/python -u /opt/oops/app/scripts/local_backend.py --state-dir /var/lib/oops/backend --jev-env /var/lib/oops/jev.env --lark-cli /opt/oops/tools/node_modules/.bin/lark-cli --feishu live
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/oops
+
+[Install]
+WantedBy=multi-user.target

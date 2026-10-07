@@ -8,6 +8,11 @@ fi
 ./android/gradlew -p android testDebugUnitTest assembleDebug "$@"
 node --check android/app/src/main/assets/web/app.js
 node --check android/app/src/main/assets/web/bridge-mock.js
+node --check web/voiceprint/enroll.js
+node scripts/test_voiceprint_audio.js
 python3 -m py_compile scripts/prepare_test_audio.py scripts/device_wav_recall.py scripts/device_stability.py scripts/jev_probe.py scripts/analyze_stability.py scripts/local_api_fixture.py scripts/mac_audio_bridge.py scripts/local_backend.py scripts/voiceprint.py scripts/asr_words_probe.py scripts/voiceprint_split.py
 python3 scripts/local_backend.py --self-test
 python3 scripts/test_voiceprint_split.py
+python3 scripts/test_backend_http.py
+python3 scripts/test_voiceprint_registry.py
+python3 scripts/test_speaker_preview.py

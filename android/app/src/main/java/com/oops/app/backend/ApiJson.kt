@@ -119,6 +119,7 @@ object ApiJson {
         .put("text", r.text).put("clip_start_ms", r.clipStartMs)
         .put("words", JSONArray(r.words.map(::word)))
         .put("context", JSONArray(r.context.map(::candidate)))
+        .put("preview", r.preview).put("clip_end_ms", r.clipEndMs)
 
     fun speakerResult(json: JSONObject): SpeakerResult =
         SpeakerResult(json.stringOrNull("speaker"), json.optDouble("score", 0.0),
@@ -128,7 +129,23 @@ object ApiJson {
                     SpeakerSegment(s.getLong("start_ms"), s.getLong("end_ms"), s.getString("text"),
                         s.stringOrNull("speaker"), s.optDouble("score", 0.0), s.stringOrNull("source"), s.optBoolean("approx", true))
                 }
-            }.orEmpty(), json.optBoolean("segments_validated", false))
+            }.orEmpty(), json.optBoolean("segments_validated", false),
+            json.optJSONObject("preview")?.let { runCatching { speakerPreview(it) }.getOrNull() })
+
+    fun speakerPreview(json: JSONObject): com.oops.app.buffer.SpeakerPreview {
+        val activities = json.getJSONArray("activities")
+        require(activities.length() <= 2000)
+        val segments = json.optJSONArray("segments") ?: JSONArray()
+        require(segments.length() <= 200)
+        return com.oops.app.buffer.SpeakerPreview(json.getLong("start_ms"), json.getLong("end_ms"),
+            (0 until activities.length()).map { i -> activities.getJSONObject(i).let { a ->
+                com.oops.app.buffer.SpeakerActivity(a.getLong("start_ms"), a.getLong("end_ms"),
+                    a.getString("kind"), a.stringOrNull("speaker"), a.getDouble("score")) } },
+            (0 until segments.length()).map { i -> segments.getJSONObject(i).let { s ->
+                com.oops.app.buffer.PreviewSegment(s.getLong("start_ms"), s.getLong("end_ms"), s.getString("text"),
+                    s.stringOrNull("speaker"), s.getDouble("score"), s.getString("kind"), s.stringOrNull("source"),
+                    s.optBoolean("approx", true)) } }, json.optBoolean("experimental", false), json.optBoolean("jev_used", false))
+    }
 
     private fun JSONObject.stringOrNull(key: String): String? =
         if (isNull(key)) null else optString(key).takeIf { it.isNotEmpty() }

@@ -25,6 +25,9 @@ interface AudioSource {
         /** Connection state shown to the user, e.g. "等待 Mac 收音连接"; null clears it. */
         fun onStatus(detail: String?) {}
 
+        /** False when the external input disconnects; received PCM marks it ready again. */
+        fun onReady(ready: Boolean) {}
+
         fun onError(error: Throwable)
     }
 
