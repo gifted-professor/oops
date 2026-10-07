@@ -1,6 +1,8 @@
 package com.oops.app.backend
 
 import com.oops.app.buffer.Utterance
+import com.oops.app.buffer.WordTime
+import com.oops.app.buffer.SpeakerSegment
 
 /** App ↔ backend contract; the wire format is documented in docs/api.md. */
 interface OopsApi {
@@ -19,11 +21,29 @@ interface OopsApi {
 
     /** Voiceprint lookup for one sentence's audio (16 kHz mono s16le); null when the backend can't tell. */
     suspend fun identifySpeaker(request: SpeakerRequest): SpeakerResult? = null
+    suspend fun tagUtterance(request: TagRequest): TagResult? = null
 }
 
-class SpeakerRequest(val sessionId: String, val utteranceId: String, val pcm: ByteArray)
+class SpeakerRequest(
+    val sessionId: String, val utteranceId: String, val pcm: ByteArray,
+    val text: String = "", val clipStartMs: Long = 0,
+    val words: List<WordTime> = emptyList(), val context: List<Candidate> = emptyList(),
+)
 
-data class SpeakerResult(val speaker: String?, val score: Double)
+data class SpeakerResult(val speaker: String?, val score: Double, val segments: List<SpeakerSegment> = emptyList(),
+    val segmentsValidated: Boolean = false) {
+    fun usableSegments(u: Utterance): List<SpeakerSegment> {
+        if (!segmentsValidated || segments.isEmpty() || segments.joinToString("") { it.text } != u.text) return emptyList()
+        if (segments.first().startMs != u.startMs || segments.last().endMs != u.endMs) return emptyList()
+        if (segments.any { it.startMs < u.startMs || it.endMs > u.endMs || it.endMs <= it.startMs ||
+                !it.score.isFinite() || it.source !in setOf(null, "voiceprint", "voiceprint+context") }) return emptyList()
+        if (segments.zipWithNext().any { (a, b) -> a.endMs != b.startMs }) return emptyList()
+        return segments
+    }
+}
+
+data class TagRequest(val sessionId: String, val utterance: Candidate, val context: List<Candidate> = emptyList())
+data class TagResult(val utteranceId: String, val tag: String, val prob: Double?, val engine: String)
 
 data class Candidate(
     val id: String,
@@ -31,9 +51,12 @@ data class Candidate(
     val endMs: Long,
     val speaker: String?,
     val text: String,
+    val tag: String? = null,
+    val words: List<WordTime> = emptyList(),
+    val segments: List<SpeakerSegment> = emptyList(),
 )
 
-fun Utterance.toCandidate() = Candidate(id, startMs, endMs, speaker, text)
+fun Utterance.toCandidate() = Candidate(id, startMs, endMs, speaker, text, tag, words, segments)
 
 data class RecallRequest(
     val sessionId: String,

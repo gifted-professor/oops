@@ -28,12 +28,20 @@ data class EngineState(
     val remoteAddress: String = "127.0.0.1:7790",
     /** Session spans that were recorded but not transcribed (ASR down). */
     val asrGaps: List<AsrGap> = emptyList(),
+    val commitmentCount: Int = 0,
+    val analysisPending: Int = 0,
+    val analysisFailed: Int = 0,
+    val tagsSupported: Boolean? = null,
+    val sessionTruncated: Boolean = false,
 )
 
 sealed interface OopsEvent {
     data class Partial(val text: String, val startMs: Long, val endMs: Long) : OopsEvent
     data class Final(val utterance: Utterance) : OopsEvent
-    data class SpeakerIdentified(val utteranceId: String, val speaker: String, val score: Double) : OopsEvent
+    data class SpeakerIdentified(val utteranceId: String, val speaker: String?, val score: Double,
+        val segments: List<com.oops.app.buffer.SpeakerSegment> = emptyList()) : OopsEvent
+    data class UtteranceTagged(val utterance: Utterance) : OopsEvent
+    data class SessionSummary(val sessionId: String, val commitments: List<Utterance>, val audioIds: Set<String>) : OopsEvent
     data class Pruned(val ids: List<String>) : OopsEvent
     data class RecallPending(val trigger: String) : OopsEvent
     data class RecallReady(val card: RecallCard) : OopsEvent

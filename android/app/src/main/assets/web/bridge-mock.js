@@ -27,6 +27,7 @@
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const id = (prefix) => `${prefix}-${crypto.randomUUID()}`;
   let startedAt = 0, timer = null, transcript = [], cards = new Map(), drafts = new Map();
+  let sessionTranscript = [];
   let actions = new Map(), draftOps = new Map(), recallCount = 0, playingKey = null;
   const audio = new Audio('../test/dialog.wav');
   let clipTimer = null;
@@ -44,7 +45,13 @@
       const uid = `${state.sessionId}-u${i + 1}`;
       if (state.sessionMs >= u.endMs + 300 && !transcript.some((x) => x.id === uid)) {
         const final = { ...u, id: uid, speaker: null };
-        transcript.push(final); emit('asr.final', final);
+        transcript.push(final); sessionTranscript.push(final); emit('asr.final', final);
+        final.tag = i === 0 ? 'constraint' : i === 3 ? 'commitment' : 'uncertain';
+        final.tagEngine = 'rules-mock';
+        emit('asr.tag', { ...final });
+        state.commitmentCount = sessionTranscript.filter((u) => u.tag === 'commitment').length;
+        state.tagsSupported = true; state.analysisPending = 0; state.analysisFailed = 0;
+        emit('session.summary', summary());
       } else if (state.sessionMs >= u.startMs && state.sessionMs < u.endMs) {
         const chars = Math.ceil(u.text.length * (state.sessionMs - u.startMs) / (u.endMs - u.startMs));
         emit('asr.partial', { ...u, text: u.text.slice(0, chars) });
@@ -53,6 +60,9 @@
     const expired = transcript.filter((u) => u.endMs < state.sessionMs - state.retentionMs);
     if (expired.length) { transcript = transcript.filter((u) => !expired.includes(u));emit('transcript.pruned', { ids: expired.map((u) => u.id) }); }
     emit('state', { ...state });
+  }
+  function summary() {
+    return { sessionId: state.sessionId, commitments: sessionTranscript.filter((u) => u.tag === 'commitment').map((u) => ({ ...u, audioExpired: false })) };
   }
   async function recall(p) {
     emit('recall.pending', { trigger: 'button' }); await sleep(350);
@@ -70,7 +80,7 @@
   async function draft(p) {
     const card = cards.get(p.cardId);
     if (!card) throw new Error('卡片已失效');
-    const chosen = card.pool.filter((u) => p.utteranceIds.includes(u.id));
+    const chosen = card.pool.filter((u) => p.utteranceIds.includes(u.id)).map((u) => sessionTranscript.find((x) => x.id === u.id) || u);
     if (!chosen.length) throw new Error('没有选中原话');
     await sleep(250);
     const d = { draftId: id('d'), cardId: card.id, who: '', what: chosen.map((u) => u.text).join(' '),
@@ -94,17 +104,26 @@
   }
   function handle(type, p) {
     switch (type) {
-      case 'hello': queueMicrotask(() => emit('snapshot', { state, transcript, team, insets: { top: 0, bottom: 0 } }));break;
+      case 'hello': queueMicrotask(() => emit('snapshot', { state, transcript, summary: summary(), team, insets: { top: 0, bottom: 0 } }));break;
       case 'capture.start':
         if (state.capturing) break;
-        stopClip();transcript = [];cards.clear();state.sessionId = id('session');
-        Object.assign(state, { capturing: true, sessionMs: 0, bufferedMs: 0, asr: 'simulated' });
+        stopClip();transcript = [];sessionTranscript = [];cards.clear();state.sessionId = id('session');
+        Object.assign(state, { capturing: true, sessionMs: 0, bufferedMs: 0, asr: 'simulated', commitmentCount: 0, analysisPending: 0, analysisFailed: 0, tagsSupported: null });
         startedAt = performance.now();emit('state', { ...state });clearInterval(timer);timer = setInterval(tick, 100);break;
       case 'capture.stop': state.capturing = false;state.asr = 'off';state.level = 0;clearInterval(timer);stopClip();emit('state', { ...state });break;
       case 'recall.trigger': void recall(p);break;
+      case 'commitment.open': {
+        const u = sessionTranscript.find((u) => u.id === p.utteranceId && u.tag === 'commitment');
+        if (!u) break;
+        const at = sessionTranscript.indexOf(u);
+        const card = { id: id('c'), trigger: 'commitment', query: null, nowMs: state.sessionMs,
+          single: true, engine: 'rules-mock', windowMs: 0, latencyMs: 0, items: [{ ...u, prob: 1 }],
+          pool: sessionTranscript.slice(Math.max(0, at - 2), at + 3) };
+        cards.set(card.id, card); emit('recall.card', card); break;
+      }
       case 'clip.play':
         stopClip();
-        if (p.startMs < state.sessionMs - state.retentionMs) { emit('clip.state', { key: p.key, state: 'expired' });break; }
+        if (p.startMs < state.sessionMs - state.retentionMs && !sessionTranscript.some((u) => u.tag === 'commitment' && u.startMs <= p.startMs && u.endMs >= p.endMs)) { emit('clip.state', { key: p.key, state: 'expired' });break; }
         playingKey = p.key;audio.currentTime = Math.max(0, p.startMs / 1000);state.playing = true;
         emit('clip.state', { key: p.key, state: 'playing' });
         audio.play().catch(() => { emit('toast', { message: '浏览器未允许音频播放，请再次点击回听' });stopClip(); });

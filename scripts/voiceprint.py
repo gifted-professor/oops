@@ -415,7 +415,21 @@ def main():
     c.add_argument("--seed", type=int, default=7)
     c.add_argument("--port", type=int, default=8791)
     c.add_argument("--fresh", action="store_true", help="重新抽样（会覆盖旧片段）")
+    c.add_argument("--split", action="store_true", help="独立句内切点/说话人/承诺人标注，不使用自动聚类作真值")
+    s = sub.add_parser("split-prepare", help="冻结分层抽样集（两场完整 ASR 结果，开发/验收分离）")
+    s.add_argument("--seed", type=int, default=7)
+    v = sub.add_parser("split-eval", help="开发集调参、独立验收三档拆分和负责人；未标注不生成通过配置")
+    v.add_argument("--tune", action="store_true", help="仅用开发集扫描并冻结 short 阈值")
+    v.add_argument("--accept", type=float, default=.5)
+    v.add_argument("--margin", type=float, default=.05)
+    v.add_argument("--no-jev", action="store_true")
+    v.add_argument("--jev-env", default=".jev.env")
+    v.add_argument("--jev-model", default="jev-latest")
     args = p.parse_args()
+    if args.cmd in ("split-prepare", "split-eval") or (args.cmd == "spotcheck" and args.split):
+        import voiceprint_split
+        return {"split-prepare": voiceprint_split.prepare, "split-eval": voiceprint_split.evaluate,
+                "spotcheck": voiceprint_split.serve}[args.cmd](args)
     {"analyze": analyze, "label": label, "relabel": relabel, "evaluate": evaluate, "spotcheck": spotcheck, "enroll": enroll}[args.cmd](args)
 
 

@@ -24,6 +24,8 @@
   const S = {
     state: { capturing: false, sessionMs: 0, bufferedMs: 0, retentionMs: 300000, asr: 'off', level: 0, savedCount: 0, asrGaps: [] },
     lines: new Map(), // utterance id → <li>
+    records: new Map(),
+    commitments: [],
     sheet: null, // { kind, ... }
     card: null, // { data, sel, before, after }
     draft: null, // { data, status: editing|sending|done, result, error }
@@ -85,6 +87,7 @@
         S.state.sessionId = p.state.sessionId; // the snapshot already is this session's transcript
         (p.transcript || []).forEach(addLine);
         setState(p.state);
+        if (p.summary) setSummary(p.summary);
         if (p.pendingActions?.length) {
           openDraft(p.pendingActions[0].draft);
           onActionResult(p.pendingActions[0].result);
@@ -101,7 +104,14 @@
         $('partial').textContent = '';
         addLine(p);
         break;
-      case 'asr.speaker': setLineSpeaker(p.id, p.speaker); break;
+      case 'asr.speaker': setLineSpeaker(p.id, p.speaker, p.segments); break;
+      case 'asr.tag':
+        if (S.records.has(p.id)) {
+          S.records.set(p.id, { ...S.records.get(p.id), ...p });
+          renderLine(p.id);
+        }
+        break;
+      case 'session.summary': setSummary(p); break;
       case 'transcript.pruned':
         (p.ids || []).forEach(removeLine);
         $('pruned-note').hidden = false;
@@ -147,6 +157,8 @@
   function resetTranscript() {
     $('lines').innerHTML = '';
     S.lines.clear();
+    S.records.clear();
+    S.commitments = [];
     $('partial').textContent = '';
     $('pruned-note').hidden = true;
     $('empty').hidden = false;
@@ -184,6 +196,12 @@
     capture.textContent = s.capturing ? '停止收音' : '开始收音';
     capture.classList.toggle('stop', !!s.capturing);
     $('saved-count').textContent = s.savedCount ?? 0;
+    const commitments = $('btn-commitments');
+    commitments.hidden = !!s.capturing || !s.sessionId ||
+      (!(s.analysisPending || s.analysisFailed || s.commitmentCount) && s.tagsSupported == null);
+    commitments.textContent = s.tagsSupported === false ? '当前后端不支持承诺分析' :
+      `本场发现 ${s.commitmentCount || 0} 个承诺${s.analysisPending ? ` · 另有 ${s.analysisPending} 句还在分析` : ''}${s.analysisFailed ? ` · ${s.analysisFailed} 句分析失败` : ''}`;
+    commitments.disabled = !S.commitments.length;
 
     if (S.sheet?.kind === 'settings') {
       const diag = $('diag');
@@ -207,28 +225,43 @@
     const next = [...list.children].find((el) => Number(el.dataset.start) > u.startMs) || null;
     list.insertBefore(li, next);
     S.lines.set(u.id, li);
+    S.records.set(u.id, u);
+    renderLine(u.id);
     $('empty').hidden = true;
     scrollToEnd();
   }
 
   /** The voiceprint answer arrives after the caption; add or replace the name chip in place. */
-  function setLineSpeaker(id, speaker) {
-    const li = S.lines.get(id);
-    if (!li) return;
-    const text = li.querySelector('div');
-    let chip = text.querySelector('.spk');
-    if (!chip) {
-      chip = document.createElement('span');
-      chip.className = 'spk';
-      text.prepend(chip);
-    }
-    chip.textContent = speakerLabel(speaker);
+  function setLineSpeaker(id, speaker, segments = []) {
+    const u = S.records.get(id);
+    if (!u) return;
+    u.speaker = speaker;
+    u.segments = segments;
+    renderLine(id);
+  }
+
+  const TAG_LABELS = { commitment: '承诺/指派', decision: '决定', idea: '想法', constraint: '约束', chitchat: '寒暄', uncertain: '待判断' };
+  function renderLine(id) {
+    const u = S.records.get(id), li = S.lines.get(id);
+    if (!u || !li) return;
+    const speaker = speakerLabel(u.speaker);
+    const words = u.segments?.length ? u.segments.map((s) => `<span class="${s.approx ? 'approx-segment' : ''}"><span class="spk">${esc(speakerLabel(s.speaker) || '未知')}</span>${esc(s.text)}</span>`).join('') :
+      `${speaker ? `<span class="spk">${esc(speaker)}</span>` : ''}${esc(u.text)}`;
+    li.querySelector('div').innerHTML = `${words}${TAG_LABELS[u.tag] ? ` <span class="badge value-tag">${TAG_LABELS[u.tag]}</span>` : ''}`;
+  }
+
+  function setSummary(p) {
+    if (p.sessionId !== S.state.sessionId) return;
+    S.commitments = p.commitments || [];
+    renderStatus();
+    if (S.sheet?.kind === 'commitments') renderSheet();
   }
 
   function removeLine(id) {
     const li = S.lines.get(id);
     if (li) li.remove();
     S.lines.delete(id);
+    S.records.delete(id);
   }
 
   function highlight(ids) {
@@ -283,6 +316,7 @@
       result: resultHtml,
       settings: settingsHtml,
       saved: savedHtml,
+      commitments: commitmentsHtml,
     }[k];
     $('sheet').innerHTML = html ? html() : '';
     syncPlayButtons();
@@ -290,6 +324,13 @@
 
   const spinnerHtml = (title, sub) =>
     `<div class="grabber"></div><div class="center"><div class="spinner"></div><p style="margin:0">${title}</p><p class="fine">${sub}</p></div>`;
+
+  function commitmentsHtml() {
+    return `<div class="grabber"></div><div class="sheet-head"><span class="kicker">本场承诺与指派</span><button class="close" data-act="close" aria-label="关闭">✕</button></div>
+      ${S.state.sessionTruncated ? '<p class="fine">本场文字索引已达上限，较早条目已移出列表。</p>' : ''}
+      <div class="cands">${S.commitments.map((u) => `<button class="cand" data-act="commitment-open" data-id="${esc(u.id)}"><span><span class="t">${esc(u.text)}</span><span class="meta">${clock(u.startMs)}${u.speaker ? ` · ${esc(speakerLabel(u.speaker))}` : ''}${u.audioExpired ? ' · 原声未保留' : ''}</span></span></button>`).join('')}</div>
+      <p class="footnote">本场内容保存在内存中，下次收音或退出进程后清除。原声最多暂存 50 段。</p>`;
+  }
 
   function notFoundHtml() {
     return `<div class="grabber"></div>
@@ -565,6 +606,7 @@
 
   const ACTIONS = {
     close: closeSheet,
+    'commitment-open': (el) => send('commitment.open', { utteranceId: el.dataset.id }),
     'retry-recall': () => { closeSheet(); send('recall.trigger'); },
     cand: (el) => { S.card.sel = Number(el.dataset.i); S.card.before = 0; S.card.after = 0; renderSheet(); },
     prev: () => { S.card.before += 1; renderSheet(); },
@@ -607,6 +649,7 @@
   $('btn-capture').addEventListener('click', () => send(S.state.capturing ? 'capture.stop' : 'capture.start'));
   $('btn-oops').addEventListener('click', () => send('recall.trigger'));
   $('btn-saved').addEventListener('click', () => send('saved.list'));
+  $('btn-commitments').addEventListener('click', () => openSheet({ kind: 'commitments' }));
   $('btn-settings').addEventListener('click', () => openSheet({ kind: 'settings' }));
 
   send('hello');

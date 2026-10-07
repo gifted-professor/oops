@@ -1,3 +1,5 @@
+.approx-segment { opacity: .65; }
+.value-tag { white-space: nowrap; }
 :root {
   --brand: #6e56f8;
   --brand-2: #9b7bff;

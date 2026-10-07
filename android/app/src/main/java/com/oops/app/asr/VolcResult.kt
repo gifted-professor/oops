@@ -1,5 +1,6 @@
 package com.oops.app.asr
 
+import com.oops.app.buffer.WordTime
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -10,8 +11,9 @@ data class RawUtterance(
     val text: String,
     val definite: Boolean,
     val speakerId: String?,
+    val words: List<WordTime> = emptyList(),
 ) {
-    fun shift(ms: Long) = if (ms == 0L) this else copy(startMs = startMs + ms, endMs = endMs + ms)
+    fun shift(ms: Long) = if (ms == 0L) this else copy(startMs = startMs + ms, endMs = endMs + ms, words = words.map { it.shift(ms) })
 }
 
 data class AsrUpdate(val finals: List<RawUtterance>, val partial: RawUtterance?)
@@ -44,6 +46,16 @@ object VolcResult {
                 text = u.stringOrNull("text").orEmpty().trim(),
                 definite = u.optBoolean("definite", false),
                 speakerId = u.optJSONObject("additions")?.let { it.stringOrNull("speaker_id") ?: it.stringOrNull("speaker") },
+                words = u.optJSONArray("words")?.let { words ->
+                    (0 until words.length()).mapNotNull { j ->
+                        val w = words.optJSONObject(j) ?: return@mapNotNull null
+                        val word = w.stringOrNull("text") ?: w.stringOrNull("word") ?: return@mapNotNull null
+                        if (!w.has("end_time")) return@mapNotNull null
+                        val a = w.optLong("start_time", 0)
+                        val b = w.optLong("end_time", a)
+                        if (a < 0 || b < a) null else WordTime(word, a, b)
+                    }
+                }.orEmpty(),
             )
             if (parsed.text.isEmpty()) continue
             if (parsed.definite) finals += parsed else partial = parsed

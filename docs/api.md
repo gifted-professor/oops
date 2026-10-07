@@ -1,7 +1,11 @@
-# Oops App ↔ 后端接口契约（P0）
+# Oops App ↔ 后端接口契约
 
 后端负责人：洪玉麟。Android 已实现 HTTP 客户端；未填写地址时使用 App 内 Mock。
 所有接口使用 JSON，字段名 snake_case；整次 HTTP 请求超时 10 秒。时间窗口、原声起止、`now_ms` 都是**当前会话音频时间轴的毫秒**，不是 Unix 时间戳。
+
+音频坐标统一约定：ASR 返回连接内时间，App 先加该连接的 `baseMs`；App 内部及所有 HTTP 音频时间字段均为会话坐标。`clip_start_ms` 是上传 PCM 第一个样本的会话时间。后端只在模型计算中使用 `t - clip_start_ms`，响应再加回。草稿的 `reference_time` 仍是 ISO 8601 绝对时间。
+
+候选、草稿原话及上下文可增加 `tag`、`words:[{text,start_ms,end_ms}]`、`segments:[{start_ms,end_ms,text,speaker,score,source,approx}]`；旧后端可忽略新增字段。原文必须完整保留，分段文本拼接须等于 ASR 定稿全文，起草和保存按原句 ID 从会话索引取最新信息。
 
 ## 1. POST /v1/recall
 
@@ -110,10 +114,61 @@ Android 在发请求前保存原操作及冻结的草稿。响应丢失／10 次
 
 ## P1 预留（尚未接入）
 
-- `POST /v1/utterances`：session_id、conversation_id、utterance_id、sequence、原句与起止毫秒；以 utterance_id 去重，异步重试不阻塞录音。
 - `POST /v1/conversations/{id}/end`：携带最后 sequence，后端确认之前定稿已收齐再返回承诺列表。
 - 当事人确认需版本化扩展状态，例如 awaiting_confirmation / accepted / rejected；当前 P0 App 不接受这些状态。
 - 长对话中承诺原声应在初步发现时暂存；不能等对话结束后才从已覆盖的 5 分钟缓冲中取回。
+
+## 5. POST /v1/utterances（已接入）
+
+```json
+{
+  "session_id":"session-example", "utterance_id":"u2",
+  "start_ms":11700, "end_ms":16100, "text":"我周五前把方案发给你。", "speaker":null,
+  "context":[{"text":"我们还需要一个新方案。","speaker":null}]
+}
+```
+```json
+{"utterance_id":"u2","tag":"commitment","prob":0.91,"engine":"jev-1.13.0"}
+```
+
+标签枚举：`commitment / decision / idea / constraint / chitchat / uncertain`。Jev 所选项概率低于 0.5 时返回 `uncertain`，不算寒暄、不计承诺，召回加权视为无标签。规则兜底只输出明确的 `commitment`、`constraint` 或 `uncertain`，`prob:null, engine:rules`；它没有可校准的模型概率。仅出现日期、人名、收件人、否定、疑问、引用、假设或已完成事项不判为新的承诺。
+
+标签在定稿时独立发出，不等待声纹。`context` 最多前 4 句，固定发送时的快照。成功结果按 `(session_id, utterance_id)` 缓存，重复请求直接返回首次结果，context 的变化不触发重算。成功的规则兜底结果也缓存；真正失败、没有结果的请求不缓存。当前原型最多缓存 20,000 个结果。
+
+App 可选接口重试策略：IO、429、5xx 最多重试 2 次，间隔 1、3 秒；400、401、403 等不重试。404/501 表示不支持，本场停用对应接口。标签和声纹各限 2 个并行请求。停止收音保留进行中请求，后续结果仍更新本场；下一场开始后丢弃旧场结果，旧场的停用状态不影响新场。
+
+## 6. POST /v1/speaker（整句已接入，句内拆分待人工验收）
+
+```json
+{
+  "session_id":"session-example", "utterance_id":"u2", "sample_rate":16000,
+  "pcm_base64":"<16 kHz mono s16le>", "clip_start_ms":11700,
+  "text":"我周五前把方案发给你。",
+  "words":[{"text":"我","start_ms":11700,"end_ms":11900}], "context":[]
+}
+```
+```json
+{
+  "utterance_id":"u2", "speaker":"洪玉麟", "score":0.81, "runner_up":0.42,
+  "engine":"campplus-zh", "segments_validated":true,
+  "segments":[{"start_ms":11700,"end_ms":16100,"text":"我周五前把方案发给你。",
+    "speaker":"洪玉麟","score":0.81,"source":"voiceprint","approx":false}]
+}
+```
+
+示例只展示格式，不是实际验收结果。PCM 长度允许 0.5–30 秒；JSON 请求体上限 2 MB，容纳 base64 编码后的 30 秒 PCM。`text` 是二遍识别后的定稿全文，作为 words 对齐目标。缺字段的旧请求继续整句识别，旧响应可以没有 segments。
+
+`source` 为 `voiceprint`（达到普通/短段对应阈值，先锁定，Jev 不可改）、`voiceprint+context`（未锁定段，经 Jev 概率 ≥0.7 且声纹前两名守卫通过）、或 null（未知）。`approx` 表示词/原文时间映射是否近似，不能用近似切字自动解析“我”的负责人。Jev 批量裁决只包含未锁定段，故障保持未知。
+
+本地后端默认关闭拆分和 self 自动填人。只有 `voiceprint.py split-eval` 在冻结参数后的独立验收集通过，生成 `models/voiceprint/split-validation.json`，且代码、模型、注册声纹、标注集和人工真值指纹仍一致，后端重启后才允许启用。未通过时返回 `segments:[], segments_validated:false`。负责人自动填写有单独门槛，失败时拆分可启用而 self 仍留空。
+
+负责人先区分明确点名/self/未知；点名须有指派关系，“发给某人”不算。self 必须只有一个明确的第一人称承诺，承诺短语完整位于一个 `source=voiceprint, approx=false` 的分段中，并已通过自动填人验收。跨段、多个承诺、近似、Jev 辅助声纹和未知均留空，交由用户选择。
+
+## 本场承诺索引
+
+文字、字时间戳、标签和说话人信息在内存中保留至下次开始收音，上限 20,000 句；达到上限移出最早条目并提示。标签为承诺时及时复制原声，最多 50 段且总字节不超过 16 MiB；超过上限淘汰最早原声，文字保留并显示“原声未保留”。回听/保存仅在完整选中范围被 ring 或暂存原声覆盖时取音频，不把缺失的上下文或音频空隙伪装成完整录音。
+
+停止后显示承诺数、待分析句数和分析失败句数，结果到达实时更新。承诺列表可打开现有召回卡片、回听、保存和起草；未支持分析的后端明确显示不支持。本轮不落盘，进程退出会丢失本场索引；只有用户点“保存”才写入长期记忆。
 
 ## 联调验收
 

@@ -24,14 +24,17 @@ class HttpOopsApi(private val http: OkHttpClient, baseUrl: String) : OopsApi {
         ApiJson.actionResult(post("/v1/actions/confirm", ApiJson.confirmRequest(request)))
 
     /** Optional endpoint: a backend without voiceprints answers 404/501 and we simply skip. */
-    override suspend fun identifySpeaker(request: SpeakerRequest): SpeakerResult? = withContext(Dispatchers.IO) {
-        val body = ApiJson.speakerRequest(request).toString().toRequestBody(JSON)
-        http.newCall(Request.Builder().url("$base/v1/speaker").post(body).build()).execute().use { response ->
-            when {
-                response.code == 404 || response.code == 501 -> null
-                !response.isSuccessful -> throw IOException("声纹识别返回 ${response.code}")
-                else -> ApiJson.speakerResult(JSONObject(response.body.string()))
-            }
+    override suspend fun identifySpeaker(request: SpeakerRequest): SpeakerResult? =
+        optional("/v1/speaker", ApiJson.speakerRequest(request))?.let(ApiJson::speakerResult)
+
+    override suspend fun tagUtterance(request: TagRequest): TagResult? =
+        optional("/v1/utterances", ApiJson.tagRequest(request))?.let(ApiJson::tagResult)
+
+    private suspend fun optional(path: String, json: JSONObject): JSONObject? = withContext(Dispatchers.IO) {
+        http.newCall(Request.Builder().url(base + path).post(json.toString().toRequestBody(JSON)).build()).execute().use { response ->
+            if (response.code == 404 || response.code == 501) null
+            else if (!response.isSuccessful) throw HttpFailure(response.code, "分析接口返回 HTTP ${response.code}")
+            else JSONObject(response.body.string())
         }
     }
 

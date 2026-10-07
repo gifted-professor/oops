@@ -171,6 +171,7 @@ class MainActivity : ComponentActivity() {
                     JSONObject()
                         .put("state", BridgeJson.state(OopsEngine.state.value))
                         .put("transcript", JSONArray(OopsEngine.transcriptSnapshot().map(BridgeJson::utterance)))
+                        .put("summary", BridgeJson.summary(OopsEngine.sessionSummary()))
                         .put("team", JSONArray(Settings.TEAM))
                         .put("pendingActions", JSONArray(OopsEngine.pendingActions().map { (draft, result) ->
                             JSONObject().put("draft", BridgeJson.draft(draft))
@@ -181,6 +182,7 @@ class MainActivity : ComponentActivity() {
                 "capture.start" -> requestCapture(p.optString("source").ifBlank { OopsEngine.settings.source })
                 "capture.stop" -> CaptureService.stop(this)
                 "recall.trigger" -> OopsEngine.triggerRecall("button", p.optString("query").ifBlank { null })
+                "commitment.open" -> OopsEngine.openCommitment(p.getString("utteranceId"))
                 "clip.play" -> OopsEngine.playClip(p.getString("key"), p.getLong("startMs"), p.getLong("endMs"))
                 "clip.stop" -> OopsEngine.stopClip()
                 "recall.save" -> OopsEngine.saveRecall(

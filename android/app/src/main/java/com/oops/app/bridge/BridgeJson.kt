@@ -33,6 +33,9 @@ object BridgeJson {
         .put("sourceDetail", s.sourceDetail ?: NULL)
         .put("remoteAddress", s.remoteAddress)
         .put("asrGaps", JSONArray(s.asrGaps.map { JSONObject().put("fromMs", it.fromMs).put("toMs", it.toMs) }))
+        .put("commitmentCount", s.commitmentCount).put("analysisPending", s.analysisPending)
+        .put("analysisFailed", s.analysisFailed).put("tagsSupported", s.tagsSupported ?: NULL)
+        .put("sessionTruncated", s.sessionTruncated)
 
     fun utterance(u: Utterance): JSONObject = JSONObject()
         .put("id", u.id)
@@ -40,6 +43,17 @@ object BridgeJson {
         .put("endMs", u.endMs)
         .put("text", u.text)
         .put("speaker", u.speaker ?: NULL)
+        .put("tag", u.tag ?: NULL).put("tagProb", u.tagProb ?: NULL).put("tagEngine", u.tagEngine ?: NULL)
+        .put("words", JSONArray(u.words.map { JSONObject().put("text", it.text).put("startMs", it.startMs).put("endMs", it.endMs) }))
+        .put("segments", segments(u.segments))
+
+    private fun segments(items: List<com.oops.app.buffer.SpeakerSegment>) = JSONArray(items.map {
+        JSONObject().put("startMs", it.startMs).put("endMs", it.endMs).put("text", it.text)
+            .put("speaker", it.speaker ?: NULL).put("score", it.score).put("source", it.source ?: NULL).put("approx", it.approx)
+    })
+
+    fun summary(s: OopsEvent.SessionSummary): JSONObject = JSONObject().put("sessionId", s.sessionId)
+        .put("commitments", JSONArray(s.commitments.map { utterance(it).put("audioExpired", it.id !in s.audioIds) }))
 
     fun card(c: RecallCard): JSONObject = JSONObject()
         .put("id", c.id)
@@ -97,7 +111,10 @@ object BridgeJson {
             "asr.partial" to JSONObject().put("text", e.text).put("startMs", e.startMs).put("endMs", e.endMs)
         is OopsEvent.Final -> "asr.final" to utterance(e.utterance)
         is OopsEvent.SpeakerIdentified ->
-            "asr.speaker" to JSONObject().put("id", e.utteranceId).put("speaker", e.speaker).put("score", e.score)
+            "asr.speaker" to JSONObject().put("id", e.utteranceId).put("speaker", e.speaker ?: NULL).put("score", e.score)
+                .put("segments", segments(e.segments))
+        is OopsEvent.UtteranceTagged -> "asr.tag" to utterance(e.utterance)
+        is OopsEvent.SessionSummary -> "session.summary" to summary(e)
         is OopsEvent.Pruned -> "transcript.pruned" to JSONObject().put("ids", JSONArray(e.ids))
         is OopsEvent.RecallPending -> "recall.pending" to JSONObject().put("trigger", e.trigger)
         is OopsEvent.RecallReady -> "recall.card" to card(e.card)

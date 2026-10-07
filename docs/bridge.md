@@ -15,6 +15,7 @@ H5 用 `window.OopsNative.postMessage(JSON.stringify({type,payload}))` 发送；
 | clip.stop | {} | 停止回听 |
 | recall.save | {cardId,utteranceIds,startMs,endMs} | 明确保存原句及可用原声 |
 | recall.dismiss | {cardId} | 丢弃卡片 |
+| commitment.open | {utteranceId} | 从本场索引打开承诺，进入现有卡片流程 |
 | saved.list | {} | 返回长期保存列表 |
 | action.draft | {cardId,utteranceIds} | 请求行动草稿，不写入飞书 |
 | action.confirm | {draftId,who,what,whenIso,whenRaw,constraint} | 冻结草稿、持久化 op_id、提交确认 |
@@ -29,11 +30,14 @@ H5 用 `window.OopsNative.postMessage(JSON.stringify({type,payload}))` 发送；
 
 | type | payload |
 |---|---|
-| snapshot | {state,transcript,team,insets,pendingActions:[{draft,result}]} |
-| state | {capturing,sessionId,source,sessionMs,bufferedMs,retentionMs,asr,asrDetail,level,playing,savedCount,backend,backendUrl,speakerInfo,testWavName,asrGaps} |
+| snapshot | {state,transcript,summary,team,insets,pendingActions:[{draft,result}]} |
+| state | {capturing,sessionId,source,sessionMs,bufferedMs,retentionMs,asr,asrDetail,level,playing,savedCount,backend,backendUrl,speakerInfo,testWavName,asrGaps,commitmentCount,analysisPending,analysisFailed,tagsSupported,sessionTruncated} |
 | insets | {top,bottom} CSS 像素 |
 | asr.partial | {text,startMs,endMs} |
 | asr.final | {id,text,startMs,endMs,speaker} |
+| asr.tag | 定稿句完整记录，增加 tag/tagProb/tagEngine |
+| asr.speaker | {id,speaker,score,segments} |
+| session.summary | {sessionId,commitments:[定稿句完整记录 + audioExpired]} |
 | transcript.pruned | {ids} |
 | recall.pending | {trigger} |
 | recall.card | {id,trigger,query,nowMs,single,engine,windowMs,latencyMs,items,pool} |
@@ -49,6 +53,8 @@ H5 用 `window.OopsNative.postMessage(JSON.stringify({type,payload}))` 发送；
 
 items 含候选 id/text/startMs/endMs/speaker/prob；pool 含时间排序的候选及邻句。
 evidence 为 {utteranceIds,quote,startMs,endMs}。所有时间是会话毫秒。
+
+定稿句完整记录还包括 `words:[{text,startMs,endMs}]` 与 `segments:[{startMs,endMs,text,speaker,score,source,approx}]`；桥使用 camelCase，HTTP 使用 snake_case。segments 只接收经后端独立验收的结果，文字拼接必须等于原句，区间必须连续且覆盖原句。近似段在字幕中显示浅色提示，不能用于 self 自动填人。`tagsSupported=null` 表示尚未探明支持情况；false 表示本场已停用标签请求。停止收音后在途标签仍会更新汇总，开始新会话后旧结果丢弃。
 
 `sessionId` 变化时清空字幕。snapshot 先清空再回填，防止重复字幕。pending 且 polling=true 表示正在查询；polling=false 表示结果仍未知，可继续查询。mock=true 的成功页明确标识没有真实创建飞书任务；readBackConfirmed 只表示后端查询出了同一 guid。
 

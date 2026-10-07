@@ -95,6 +95,8 @@ object OopsEngine {
 
     private val ring = AudioRingBuffer((RETENTION_MS / 1000).toInt() * Pcm.SAMPLE_RATE)
     private val transcript = TranscriptBuffer(RETENTION_MS)
+    private val sessionIndex = com.oops.app.buffer.SessionIndex()
+    @Volatile private var optionalRequests = com.oops.app.backend.OptionalRequests()
     private val player = ClipPlayer(::onClipState)
 
     @Volatile private var api: OopsApi = MockOopsApi(Settings.TEAM)
@@ -164,6 +166,8 @@ object OopsEngine {
             cards.clear()
             drafts.keys.removeAll { !submitted.containsKey(it) }
             sessionId = UUID.randomUUID().toString()
+            sessionIndex.reset(sessionId)
+            optionalRequests = com.oops.app.backend.OptionalRequests()
             reconnectAttempt = 0
             asrDownSinceMs = null
             val src = when (kind) {
@@ -183,6 +187,7 @@ object OopsEngine {
                 it.copy(
                     capturing = true, source = kind, sessionId = sessionId, sessionMs = 0, bufferedMs = 0,
                     asr = "connecting", asrDetail = null, asrGaps = emptyList(), sourceDetail = null,
+                    commitmentCount = 0, analysisPending = 0, analysisFailed = 0, tagsSupported = null, sessionTruncated = false,
                 )
             }
             try {
@@ -286,8 +291,9 @@ object OopsEngine {
             emit(OopsEvent.Pruned(removed.map { it.id }))
             Log.i(TAG, "pruned ${removed.size} utterance(s); retained=${transcript.snapshot().size}")
             val cutoff = now - RETENTION_MS
-            cards.entries.removeAll { (_, card) -> card.items.all { it.endMs < cutoff } }
-            drafts.entries.removeAll { (id, draft) -> !submitted.containsKey(id) && draft.evidence.clipEndMs < cutoff }
+            cards.entries.removeAll { (_, card) -> card.items.all { it.endMs < cutoff && sessionIndex.get(it.utteranceId) == null } }
+            drafts.entries.removeAll { (id, draft) -> !submitted.containsKey(id) && draft.evidence.clipEndMs < cutoff &&
+                draft.evidence.utteranceIds.all { sessionIndex.get(it) == null } }
         }
         level *= 0.85f
         _state.update {
@@ -346,28 +352,100 @@ object OopsEngine {
     }
 
     private fun onAsrFinal(session: String, baseMs: Long, raw: RawUtterance) {
-        if (session != sessionId) return
-        val u = transcript.add(baseMs + raw.startMs, baseMs + raw.endMs, raw.text, raw.speakerId)
+        val u = synchronized(pipeline) {
+            if (session != sessionId) return
+            val shifted = raw.shift(baseMs)
+            transcript.add(shifted.startMs, shifted.endMs, shifted.text, shifted.speakerId, shifted.words)
+                .also { sessionIndex.add(session, it) }
+        }
         Log.i(TAG, "final ${u.id} [${u.startMs}-${u.endMs}] ${u.text}")
         emit(OopsEvent.Final(u))
+        tagUtterance(session, u)
         identifySpeaker(session, u)
+    }
+
+    private fun tagUtterance(session: String, u: Utterance) {
+        val client = api
+        val policy = optionalRequests
+        val context = sessionIndex.snapshot().filter { it.startMs < u.startMs && it.id != u.id }.takeLast(4)
+        if (!sessionIndex.beginAnalysis(session, u.id)) return
+        publishSessionSummary(session)
+        scope.launch(Dispatchers.IO) {
+            try {
+                val request = com.oops.app.backend.TagRequest(session, u.toCandidate(), context.map { it.toCandidate() })
+                val result = policy.request("tag") { client.tagUtterance(request) }
+                synchronized(pipeline) {
+                    if (session != sessionId) return@synchronized
+                    if (result == null) {
+                        _state.update { it.copy(tagsSupported = false) }
+                    } else {
+                        require(result.utteranceId == u.id) { "分析结果句子编号不匹配" }
+                        val updated = sessionIndex.setTag(session, u.id, result.tag, result.prob, result.engine)
+                        transcript.setTag(u.id, result.tag, result.prob, result.engine)
+                        _state.update { it.copy(tagsSupported = true) }
+                        if (updated != null) {
+                            if (result.tag == "commitment") {
+                                val slice = ring.readAvailable(Pcm.msToSamples((u.startMs - CLIP_PAD_MS).coerceAtLeast(0)),
+                                    Pcm.msToSamples(u.endMs + CLIP_PAD_MS))
+                                if (slice != null && slice.first <= Pcm.msToSamples(u.startMs) &&
+                                    slice.first + slice.second.size / 2 >= Pcm.msToSamples(u.endMs)) {
+                                    sessionIndex.retainAudio(session, u.id, Pcm.samplesToMs(slice.first), slice.second)
+                                }
+                            }
+                            emit(OopsEvent.UtteranceTagged(updated))
+                        }
+                    }
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                Log.w(TAG, "tag failed for ${u.id}: ${error.javaClass.simpleName}")
+                synchronized(pipeline) {
+                    if (session == sessionId) _state.update { it.copy(analysisFailed = it.analysisFailed + 1) }
+                }
+            } finally {
+                sessionIndex.finishAnalysis(session, u.id)
+                publishSessionSummary(session)
+            }
+        }
+    }
+
+    fun sessionSummary(): OopsEvent.SessionSummary = OopsEvent.SessionSummary(sessionIndex.sessionId,
+        sessionIndex.commitments(), sessionIndex.commitments().filter { sessionIndex.hasAudio(it.id) }.map { it.id }.toSet())
+
+    private fun publishSessionSummary(session: String) {
+        synchronized(pipeline) {
+            if (session != sessionId) return
+            _state.update { it.copy(commitmentCount = sessionIndex.discoveredCommitments,
+                analysisPending = sessionIndex.pendingCount(), sessionTruncated = sessionIndex.truncated) }
+            emit(sessionSummary())
+        }
     }
 
     /** Asks the backend whose voice this sentence is; the caption gains a name when it answers. */
     private fun identifySpeaker(session: String, u: Utterance) {
         val client = api
+        val policy = optionalRequests
         if (client is MockOopsApi || u.endMs - u.startMs < SPEAKER_MIN_MS) return
         val pcm = ring.read(Pcm.msToSamples(u.startMs), Pcm.msToSamples(u.endMs)) ?: return
         scope.launch(Dispatchers.IO) {
-            val result = runCatching { client.identifySpeaker(SpeakerRequest(session, u.id, pcm)) }
+            val result = runCatching { policy.request("speaker") { client.identifySpeaker(SpeakerRequest(session, u.id, pcm,
+                u.text, u.startMs, u.words, sessionIndex.neighbors(listOf(u.id)).filter { it.id != u.id }.map { it.toCandidate() })) } }
                 .onFailure { Log.w(TAG, "speaker id failed for ${u.id}: ${it.message}") }
                 .getOrNull()
-            val name = result?.speaker ?: return@launch
-            if (session != sessionId) return@launch
-            transcript.setSpeaker(u.id, name)?.let {
+            if (result == null) return@launch
+            val name = result.speaker
+            val segments = result.usableSegments(u)
+            if (name == null && segments.isEmpty()) return@launch
+            synchronized(pipeline) {
+                if (session != sessionId) return@synchronized
+                sessionIndex.setSpeaker(session, u.id, name, segments)
+                transcript.setSpeaker(u.id, name, segments)?.let {
                 Log.i(TAG, "speaker ${u.id} = $name (${"%.2f".format(result.score)})")
-                emit(OopsEvent.SpeakerIdentified(u.id, name, result.score))
+                emit(OopsEvent.SpeakerIdentified(u.id, name, result.score, segments))
+                }
             }
+            publishSessionSummary(session)
         }
     }
 
@@ -501,19 +579,30 @@ object OopsEngine {
     }
 
     fun playClip(key: String, startMs: Long, endMs: Long) {
-        if (Pcm.msToSamples(startMs) < ring.startSample) {
-            emit(OopsEvent.Clip(key, "expired"))
-            return
-        }
-        val slice = ring.readAvailable(
-            Pcm.msToSamples((startMs - CLIP_PAD_MS).coerceAtLeast(0)),
-            Pcm.msToSamples(endMs + CLIP_PAD_MS),
-        )
+        val slice = evidenceAudio(startMs, endMs)
         if (slice == null) {
             emit(OopsEvent.Clip(key, "expired"))
             return
         }
-        player.play(key, slice.second)
+        player.play(key, slice)
+    }
+
+    private fun evidenceAudio(startMs: Long, endMs: Long): ByteArray? {
+        if (ring.contains(Pcm.msToSamples(startMs), Pcm.msToSamples(endMs))) {
+            return ring.readAvailable(Pcm.msToSamples((startMs - CLIP_PAD_MS).coerceAtLeast(0)),
+                Pcm.msToSamples(endMs + CLIP_PAD_MS))?.second
+        }
+        return sessionIndex.audio(startMs, endMs)?.pcm
+    }
+
+    fun openCommitment(utteranceId: String) {
+        val u = sessionIndex.get(utteranceId)?.takeIf { it.tag == "commitment" }
+            ?: return fail("recall", "这条承诺已不在本场索引里")
+        val card = RecallCard("c" + UUID.randomUUID().toString().take(8), "commitment", null, nowMs,
+            listOf(CardItem(u.id, u.startMs, u.endMs, u.text, u.speaker, u.tagProb ?: 1.0)), true,
+            sessionIndex.neighbors(listOf(u.id), before = 2, after = 2), u.tagEngine ?: "session", 0, 0)
+        cards[card.id] = card
+        emit(OopsEvent.RecallReady(card))
     }
 
     fun stopClip() = player.stop()
@@ -528,19 +617,15 @@ object OopsEngine {
     fun saveRecall(cardId: String, utteranceIds: List<String>, startMs: Long, endMs: Long) {
         val card = cards[cardId] ?: return fail("save", "这张卡片已失效")
         scope.launch(Dispatchers.IO) {
-            val chosen = card.pool().filter { it.id in utteranceIds }
+            val chosen = card.pool().filter { it.id in utteranceIds }.map { sessionIndex.get(it.id) ?: it }
             if (chosen.isEmpty()) {
                 fail("save", "没有选中任何原话")
                 return@launch
             }
-            val pcm = ring.readAvailable(
-                Pcm.msToSamples((startMs - CLIP_PAD_MS).coerceAtLeast(0)),
-                Pcm.msToSamples(endMs + CLIP_PAD_MS),
-            )?.second
+            val pcm = evidenceAudio(startMs, endMs)
             val utterances = JSONArray(
                 chosen.map {
-                    JSONObject().put("id", it.id).put("start_ms", it.startMs).put("end_ms", it.endMs)
-                        .put("speaker", it.speaker ?: JSONObject.NULL).put("text", it.text)
+                    com.oops.app.backend.ApiJson.candidate(it.toCandidate())
                 },
             )
             val meta = JSONObject()
@@ -576,14 +661,14 @@ object OopsEngine {
         if (!inFlight.add("draft:$cardId")) return
         scope.launch {
             try {
-                val pool = card.pool()
+                val pool = card.pool().map { sessionIndex.get(it.id) ?: it }
                 val chosen = pool.filter { it.id in utteranceIds }
                 if (chosen.isEmpty()) {
                     fail("action", "没有选中任何原话")
                     return@launch
                 }
                 val chosenIds = chosen.map { it.id }.toSet()
-                val context = (pool + transcript.neighbors(chosenIds, before = 4, after = 1))
+                val context = (pool + sessionIndex.neighbors(chosenIds, before = 4, after = 1))
                     .distinctBy { it.id }
                     .filter { it.id !in chosenIds }
                     .sortedBy { it.startMs }

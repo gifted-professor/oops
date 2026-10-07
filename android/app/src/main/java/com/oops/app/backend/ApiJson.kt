@@ -1,5 +1,8 @@
 package com.oops.app.backend
 
+import com.oops.app.buffer.SpeakerSegment
+import com.oops.app.buffer.WordTime
+import com.oops.app.buffer.ValueTags
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -11,6 +14,31 @@ object ApiJson {
         .put("end_ms", c.endMs)
         .put("speaker", c.speaker ?: JSONObject.NULL)
         .put("text", c.text)
+        .put("tag", c.tag ?: JSONObject.NULL)
+        .put("words", JSONArray(c.words.map(::word)))
+        .put("segments", JSONArray(c.segments.map(::segment)))
+
+    fun word(w: WordTime): JSONObject = JSONObject().put("text", w.text).put("start_ms", w.startMs).put("end_ms", w.endMs)
+    fun segment(s: SpeakerSegment): JSONObject = JSONObject()
+        .put("start_ms", s.startMs).put("end_ms", s.endMs).put("text", s.text)
+        .put("speaker", s.speaker ?: JSONObject.NULL).put("score", s.score)
+        .put("source", s.source ?: JSONObject.NULL).put("approx", s.approx)
+
+    fun tagRequest(r: TagRequest): JSONObject = JSONObject()
+        .put("session_id", r.sessionId).put("utterance_id", r.utterance.id)
+        .put("start_ms", r.utterance.startMs).put("end_ms", r.utterance.endMs)
+        .put("text", r.utterance.text).put("speaker", r.utterance.speaker ?: JSONObject.NULL)
+        .put("context", JSONArray(r.context.takeLast(4).map {
+            JSONObject().put("text", it.text).put("speaker", it.speaker ?: JSONObject.NULL)
+        }))
+
+    fun tagResult(json: JSONObject): TagResult {
+        val tag = json.getString("tag")
+        require(tag in ValueTags.ALL) { "后端返回未知价值标签" }
+        val prob = if (json.isNull("prob")) null else json.getDouble("prob")
+        require(prob == null || (prob.isFinite() && prob in 0.0..1.0)) { "标签概率无效" }
+        return TagResult(json.getString("utterance_id"), tag, prob, json.optString("engine", "unknown"))
+    }
 
     fun recallRequest(r: RecallRequest): JSONObject = JSONObject()
         .put("session_id", r.sessionId)
@@ -88,9 +116,19 @@ object ApiJson {
         .put("utterance_id", r.utteranceId)
         .put("sample_rate", 16000)
         .put("pcm_base64", java.util.Base64.getEncoder().encodeToString(r.pcm))
+        .put("text", r.text).put("clip_start_ms", r.clipStartMs)
+        .put("words", JSONArray(r.words.map(::word)))
+        .put("context", JSONArray(r.context.map(::candidate)))
 
     fun speakerResult(json: JSONObject): SpeakerResult =
-        SpeakerResult(json.stringOrNull("speaker"), json.optDouble("score", 0.0))
+        SpeakerResult(json.stringOrNull("speaker"), json.optDouble("score", 0.0),
+            json.optJSONArray("segments")?.let { segments ->
+                (0 until segments.length()).map { i ->
+                    val s = segments.getJSONObject(i)
+                    SpeakerSegment(s.getLong("start_ms"), s.getLong("end_ms"), s.getString("text"),
+                        s.stringOrNull("speaker"), s.optDouble("score", 0.0), s.stringOrNull("source"), s.optBoolean("approx", true))
+                }
+            }.orEmpty(), json.optBoolean("segments_validated", false))
 
     private fun JSONObject.stringOrNull(key: String): String? =
         if (isNull(key)) null else optString(key).takeIf { it.isNotEmpty() }

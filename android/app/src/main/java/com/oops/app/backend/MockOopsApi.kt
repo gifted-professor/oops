@@ -31,11 +31,17 @@ class MockOopsApi(
         return RecallResponse(picks, name)
     }
 
+    override suspend fun tagUtterance(request: TagRequest): TagResult {
+        delay(latencyMs)
+        return TagResult(request.utterance.id, CommitmentRules.tag(request.utterance.text, team), null, "rules-mock")
+    }
+
     /** Recent, idea-like or commitment-like sentences score higher; the query boosts lexical overlap. */
     internal fun score(c: Candidate, request: RecallRequest): Double {
         var s = -(request.nowMs - c.endMs).coerceAtLeast(0) / 60_000.0
         if (IDEA.containsMatchIn(c.text)) s += 1.5
         if (COMMITMENT.containsMatchIn(c.text)) s += 1.2
+        s += mapOf("commitment" to 1.2, "decision" to 1.2, "idea" to 1.0, "constraint" to .8)[c.tag] ?: 0.0
         if (c.text.length < 6) s -= 1.0
         if (OopsCommand.matches(c.text)) s -= 3.0 // the recall command itself is never the evidence
         request.query?.takeIf { it.isNotBlank() }?.let { s += 3.0 * overlap(it, c.text) }
@@ -48,8 +54,8 @@ class MockOopsApi(
         val whenRaw = WHEN.find(main)?.value
         val constraint = (request.utterances + request.context)
             .firstNotNullOfOrNull { CONSTRAINT.find(it.text)?.value }
-        val who = team.firstOrNull { main.contains(it) }
-            ?: request.utterances.firstNotNullOfOrNull { it.speaker }
+        // No self auto-owner until independent split/owner validation has passed.
+        val who = CommitmentRules.evidence(main, team).owner
         return DraftResponse(
             who = who,
             what = main.trim().trimEnd('。', '.', '！', '!'),
