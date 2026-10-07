@@ -4,6 +4,25 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class SessionIndexTest {
+    @Test fun chronologicalIndexHandlesLateResultsUpdatesAndEviction() {
+        val index = SessionIndex(maxUtterances = 4)
+        index.reset("s")
+        for (i in listOf(4, 1, 3, 2)) index.add("s", Utterance("u$i", i * 1000L, i * 1000L + 500, "句$i", null))
+        assertEquals(listOf("u1", "u2", "u3", "u4"), index.snapshot().map { it.id })
+        assertEquals(listOf("u2", "u3"), index.preceding("u4", 2).map { it.id })
+        for (i in listOf(4, 1)) index.setTag("s", "u$i", "commitment", null, "rules")
+        assertEquals(listOf("u1", "u4"), index.commitments().map { it.id })
+        index.setSpeaker("s", "u1", "洪玉麟")
+        assertEquals("洪玉麟", index.summary().commitments.first().speaker)
+        index.add("s", Utterance("u5", 5000, 5500, "句5", null)) // evicts first-arriving u4
+        assertNull(index.get("u4"))
+        assertEquals(listOf("u1"), index.commitments().map { it.id })
+        index.add("s", requireNotNull(index.get("u3")).copy(startMs = 900, endMs = 950))
+        assertEquals(listOf("u3", "u1", "u2", "u5"), index.snapshot().map { it.id })
+        assertEquals(listOf("u3"), index.preceding("u1").map { it.id })
+        index.setTag("s", "u1", "uncertain", null, "rules")
+        assertTrue(index.commitments().isEmpty())
+    }
     @Test fun commitmentOutlivesRingAndDraftUsesLatestSpeaker() {
         val index = SessionIndex()
         index.reset("s")

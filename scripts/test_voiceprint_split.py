@@ -4,9 +4,37 @@ import unittest
 
 from voiceprint_split import validated_truth, metrics, gates
 from asr_words_probe import summarize, difference_kind
+from local_backend import code_fingerprint, commitment_evidence, resolve_owner
 
 
 class EvaluationTest(unittest.TestCase):
+    def test_scoped_fingerprint_tracks_decisions_and_globals_but_not_unrelated_code(self):
+        source = 'LIMIT = .7\ndef owner(score):\n    "old docs"\n    local = score\n    return local >= LIMIT\ndef feishu():\n    return 1\n'
+        original = code_fingerprint(source, {"owner"})
+        self.assertEqual(original, code_fingerprint(source.replace('return 1', 'return 999'), {"owner"}))
+        self.assertEqual(original, code_fingerprint(source.replace('old docs', 'new docs') + '\ndef local():\n    return 5\n', {"owner"}))
+        self.assertNotEqual(original, code_fingerprint(source.replace('LIMIT = .7', 'LIMIT = .8'), {"owner"}))
+        self.assertNotEqual(original, code_fingerprint(source.replace('>= LIMIT', '> LIMIT'), {"owner"}))
+
+    def test_fingerprint_includes_transitive_class_dependencies(self):
+        source = 'GAP = 2\ndef helper(x): return x + GAP\nclass Split:\n    def run(self, x): return helper(x)\n'
+        self.assertNotEqual(code_fingerprint(source, {"Split"}), code_fingerprint(source.replace('GAP = 2', 'GAP = 3'), {"Split"}))
+
+    def test_named_deadlines_survive_jev_guard_but_self_stays_disabled(self):
+        class OwnerJev:
+            def choice(self, *args):
+                return {"choice": "p3", "probabilities": {"p3": 1}}, "test"
+        text = "玉麟，你周五之前把方案发我"
+        self.assertEqual(("named", "洪玉麟"), commitment_evidence(text))
+        self.assertEqual("洪玉麟", resolve_owner({"utterances": [{"text": text}]}, OwnerJev()))
+        for text in ("春源，你下周一把报告交了", "春源, 你下周一把报告交了", "林春源：你下周一把报告交了"):
+            self.assertEqual(("named", "林春源"), commitment_evidence(text), text)
+        self.assertEqual(("self", None), commitment_evidence("我周五之前把方案发给你"))
+        self.assertIsNone(resolve_owner({"utterances": [{"text": "我周五之前把方案发给你", "speaker": "洪玉麟"}]}))
+        for text in ("我之前发给你了", "我之前说过我来做", "我上周五之前把方案发了", "他说我周五之前提交",
+                     "我周五之前已经发给你了", "我周五之前不负责提交", "我周五之前提交吗？"):
+            self.assertEqual(("unknown", None), commitment_evidence(text), text)
+
     def setUp(self):
         self.case = {"id": "u1", "text": "甲乙丙丁", "start_ms": 10000, "end_ms": 14000,
                      "boundaries": [{"char": 2, "time_ms": 11000}], "context": []}
@@ -53,6 +81,7 @@ class EvaluationTest(unittest.TestCase):
         self.assertEqual((True, False), gates(result, baseline))
         self.assertEqual((True, True), gates(result | {"self_wrong": 0, "self_accuracy": 1}, baseline))
         self.assertEqual((False, False), gates(result | {"wrong_claim_rate": .051}, baseline))
+        self.assertEqual((True, False), gates(result | {"self_count": 7, "self_claimed": 7, "self_wrong": 0, "self_accuracy": 1}, baseline))
 
     def test_probe_excludes_untimed_whitespace_but_rejects_invalid_spoken_times(self):
         u = {"start_time": 1000, "end_time": 2000, "text": "甲 乙。", "words": [

@@ -4,6 +4,7 @@ package com.oops.app.backend
 object CommitmentRules {
     data class Evidence(val kind: String, val owner: String? = null)
     private const val ACTION = "(?:发给|发你|给你|负责|整理|提交|跟进|完成|交付|准备|发送|处理|联系|确认|更新|写|做|发|交)"
+    private val deadlineBefore = Regex("(下?周[一二三四五六日天]|明天|后天|今天|月底|\\d{1,2}月\\d{1,2}[日号]|\\d{1,2}[日号])之前")
     private val self = Regex("我(?:来|会|负责|[^，。！？,!?；;]{0,12})$ACTION")
     private val you = Regex("你(?:来|[^，。！？,!?；;]{0,12}(?:前|把))[^，。！？,!?；;]{0,8}$ACTION")
     private val excluded = Regex("[？?]|不是|不要|不用|不必|不能|不想|不会|不负责|来不了|没法|无法|没(?:有)?(?:做|写|交|发)|" +
@@ -13,12 +14,12 @@ object CommitmentRules {
     private val constraint = Regex("(预算|成本|费用)[^，。,.]{0,12}|(不能超过|不超过|控制在)[^，。,.]{0,10}")
 
     fun evidence(text: String, team: List<String>): Evidence {
-        if (excluded.containsMatchIn(text)) return Evidence("unknown")
+        if (excluded.containsMatchIn(deadlineBefore.replace(text) { it.groupValues[1] + "前" })) return Evidence("unknown")
         val names = (team.associateWith { it } + aliases.filterValues { it in team })
         val owners = names.mapNotNull { (alias, name) ->
             val escaped = Regex.escape(alias)
             val prefix = "(?:让|请|麻烦|交给|由)\\s*$escaped[^，。！？,!?；;]{0,12}$ACTION"
-            val subject = "$escaped(?:你|来|负责|[^，。！？,!?；;]{0,8}(?:前|把))[^，。！？,!?；;]{0,12}$ACTION"
+            val subject = "$escaped\\s*(?:[，,：:]\\s*)?(?:你|来|负责|[^，。！？,!?；;]{0,8}(?:前|把))[^，。！？,!?；;]{0,12}$ACTION"
             if (Regex("$prefix|$subject", RegexOption.IGNORE_CASE).findAll(text).any { match ->
                 !Regex("(?:给|找|跟|和|告诉|问)\\s*$").containsMatchIn(text.substring((match.range.first - 3).coerceAtLeast(0), match.range.first))
             }) name else null

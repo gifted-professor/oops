@@ -14,6 +14,7 @@ Confirm  journal the operation first, then `lark-cli task +create` as the author
 It only binds 127.0.0.1 because it acts with your Feishu identity. State lives in .local-backend/.
 """
 import argparse
+import ast
 import base64
 import datetime as dt
 import difflib
@@ -26,6 +27,7 @@ import re
 import shutil
 import subprocess
 import sys
+import symtable
 import threading
 import time
 import unicodedata
@@ -53,6 +55,7 @@ CONSTRAINT = re.compile(r"(预算|成本|费用)[^，。,.]{0,12}|(不能超过|
 WEEKDAYS = "一二三四五六日"
 FILLER = {"刚刚", "刚才", "那个", "这个", "留下", "下来", "一下"}
 ACTION = r"(?:发给|发你|给你|负责|整理|提交|跟进|完成|交付|准备|发送|处理|联系|确认|更新|写|做|发|交)"
+DEADLINE_BEFORE = re.compile(r"(下?周[一二三四五六日天]|明天|后天|今天|月底|\d{1,2}月\d{1,2}[日号]|\d{1,2}[日号])之前")
 SELF_COMMIT = re.compile(r"我(?:来|会|负责|[^，。！？,!?；;]{0,12})" + ACTION)
 ASSIGN_YOU = re.compile(r"你(?:来|[^，。！？,!?；;]{0,12}(?:前|把))[^，。！？,!?；;]{0,8}" + ACTION)
 NON_COMMIT = re.compile(r"[？?]|不是|不要|不用|不必|不能|不想|不会|不负责|来不了|没法|无法|没(?:有)?(?:做|写|交|发)|"
@@ -66,14 +69,14 @@ def commitment_evidence(text):
     Returns (kind, named owner or None). Ambiguous/multiple commitments are never collapsed
     to one owner. Unknown still lets the user choose a person in the draft UI.
     """
-    if not isinstance(text, str) or NON_COMMIT.search(text):
+    if not isinstance(text, str) or excludes_commitment(text):
         return "unknown", None
     self_commit = bool(SELF_COMMIT.search(text))
     owners = set()
     for alias, name in ALIASES.items():
         escaped = re.escape(alias)
         prefix = r"(?:让|请|麻烦|交给|由)\s*" + escaped + r"[^，。！？,!?；;]{0,12}" + ACTION
-        subject = escaped + r"(?:你|来|负责|[^，。！？,!?；;]{0,8}(?:前|把))[^，。！？,!?；;]{0,12}" + ACTION
+        subject = escaped + r"\s*(?:[，,：:]\s*)?(?:你|来|负责|[^，。！？,!?；;]{0,8}(?:前|把))[^，。！？,!?；;]{0,12}" + ACTION
         for match in re.finditer(prefix + "|" + subject, text, re.I):
             before = text[max(0, match.start() - 3):match.start()]
             if not re.search(r"(?:给|找|跟|和|告诉|问)\s*$", before):
@@ -87,6 +90,11 @@ def commitment_evidence(text):
     if self_commit:
         return "self", None
     return ("assigned_unknown", None) if ASSIGN_YOU.search(text) else ("unknown", None)
+
+
+def excludes_commitment(text):
+    # Only a bounded calendar deadline changes “之前” into “前”; past references remain excluded.
+    return bool(NON_COMMIT.search(DEADLINE_BEFORE.sub(r"\1前", text)))
 
 
 def rules_tag(text):
@@ -347,7 +355,7 @@ def resolve_owner(req, jev=None, self_enabled=False):
                 return self_owner(utterances) if kind == "self" and self_enabled else None
             if selected == "named":
                 # Explicit current-sentence self attribution wins over unrelated context names.
-                if kind == "self" or NON_COMMIT.search(main):
+                if kind == "self" or excludes_commitment(main):
                     return None
                 evidence = [commitment_evidence(u.get("text", "")) for u in utterances + context]
                 return selected_owner if ("named", selected_owner) in evidence else None
@@ -671,10 +679,71 @@ def adjudicate_segments(jev, segments, names, context=()):
         log(f"Jev speaker adjudication failed, keeping unknown: {type(exc).__name__}")
 
 
+def code_fingerprint(source, roots):
+    """Canonical AST of selected decisions plus their source-defined dependencies, not server plumbing."""
+    tree = ast.parse(source)
+    tables = {(t.get_name(), t.get_lineno()): t for t in symtable.symtable(source, "fingerprint", "exec").get_children()}
+    definitions = {}
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            definitions[node.name] = node
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                for name in ast.walk(target):
+                    if isinstance(name, ast.Name):
+                        definitions[name.id] = node
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                key = alias.asname or alias.name.split(".")[0]
+                definitions[key] = (ast.Import(names=[alias]) if isinstance(node, ast.Import)
+                                    else ast.ImportFrom(module=node.module, names=[alias], level=node.level))
+    if any(name not in definitions for name in roots):
+        raise ValueError("missing fingerprint decision root")
+    selected, pending = {}, list(roots)
+    def global_references(table):
+        names = {s.get_name() for s in table.get_symbols() if s.is_referenced() and s.is_global()}
+        for child in table.get_children():
+            names.update(global_references(child))
+        return names
+    while pending:
+        name = pending.pop()
+        if name in selected or name not in definitions or name == "log":
+            continue
+        node = definitions[name]
+        selected[name] = node
+        table = tables.get((name, getattr(node, "lineno", -1)))
+        if table is not None:
+            pending.extend(global_references(table))
+            expressions = list(node.decorator_list)
+            if isinstance(node, ast.ClassDef):
+                expressions += node.bases + [k.value for k in node.keywords]
+            else:
+                expressions += node.args.defaults + [d for d in node.args.kw_defaults if d is not None]
+            pending.extend(n.id for expression in expressions for n in ast.walk(expression) if isinstance(n, ast.Name))
+        else:
+            pending.extend(n.id for n in ast.walk(node) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load))
+    # Formatting, comments and documentation do not change a decision.
+    for node in selected.values():
+        for child in ast.walk(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and child.body \
+                    and isinstance(child.body[0], ast.Expr) and isinstance(child.body[0].value, ast.Constant) \
+                    and isinstance(child.body[0].value.value, str):
+                child.body.pop(0)
+    canonical = [(name, ast.dump(node, include_attributes=False)) for name, node in sorted(selected.items())]
+    return hashlib.sha256(json.dumps(canonical, ensure_ascii=False).encode()).hexdigest()
+
+
 def split_fingerprints():
-    paths = ["scripts/local_backend.py", "scripts/voiceprint_split.py", "models/campplus_zh.onnx", "models/voiceprint/enrolled.json"]
+    roots = {"scripts/local_backend.py": {"Speakers", "viterbi_speakers", "voiceprint_decision", "align_words",
+             "adjudicate_segments", "commitment_evidence", "self_owner", "resolve_owner", "jev_owner", "Jev",
+             "load_split_validation", "TEAM"},
+             "scripts/voiceprint_split.py": {"metrics", "gates", "gold_segments", "validated_truth", "evaluate"}}
     result = {}
-    for name in paths:
+    for name, decisions in roots.items():
+        with open(os.path.join(ROOT, name), encoding="utf-8") as stream:
+            result[name + "#decisions-v1"] = code_fingerprint(stream.read(), decisions)
+    for name in ("models/campplus_zh.onnx", "models/voiceprint/enrolled.json"):
         path = os.path.join(ROOT, name)
         if os.path.isfile(path):
             with open(path, "rb") as stream:
@@ -695,14 +764,17 @@ def load_split_validation(path):
         if (validation.get("schema") != 1 or validation.get("split_passed") is not True
                 or validation.get("holdout_count", 0) <= 0 or validation.get("manifest_hash") != manifest["hash"]
                 or validation.get("truth_hash") != digest(truth) or validation.get("fingerprints") != split_fingerprints()):
+            log("句内拆分验收未启用：验收未通过或清单、真值、算法/模型指纹不匹配")
             return None
         final = validation["voiceprint_jev"] if validation["config"].get("use_jev") else validation["voiceprint"]
         passed, owner = gates(final, validation["baseline"])
         if not passed:
+            log("句内拆分验收未启用：当前数值闸门未通过")
             return None
         self_cases = sum(a.get("reviewed") is True and a.get("self_present") is True for a in truth["answers"].values())
         return validation["config"], owner and self_cases >= 15 and validation.get("self_owner_passed") is True
-    except (OSError, ValueError, KeyError, TypeError):
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        log(f"句内拆分验收未启用：验收文件无法核验（{type(exc).__name__}）")
         return None
 
 

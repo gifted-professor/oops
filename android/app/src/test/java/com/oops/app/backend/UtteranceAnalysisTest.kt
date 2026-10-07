@@ -4,12 +4,30 @@ import com.oops.app.buffer.SpeakerSegment
 import com.oops.app.buffer.WordTime
 import java.io.IOException
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.test.runCurrent
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
+import kotlinx.coroutines.cancelAndJoin
 import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Test
 
 class UtteranceAnalysisTest {
     private val team = listOf("洪玉麟", "林春源", "Jason")
+
+    @Test fun calendarBeforeAndPunctuationKeepExplicitOwnersButNotPastActions() {
+        assertEquals("self", CommitmentRules.evidence("我周五之前把方案发给你", team).kind)
+        assertEquals("洪玉麟", CommitmentRules.evidence("玉麟你周五之前把方案发我", team).owner)
+        for (s in listOf("春源，你下周一把报告交了", "春源, 你下周一把报告交了", "林春源：你下周一把报告交了")) {
+            assertEquals(s, "林春源", CommitmentRules.evidence(s, team).owner)
+        }
+        for (s in listOf("我之前把方案发给你", "我之前说过我来做", "我上周五之前把方案发了", "我周五之前已经发给你了",
+                         "我周五之前不负责提交", "他说我周五之前提交", "我周五之前提交吗？")) {
+            assertEquals(s, "unknown", CommitmentRules.evidence(s, team).kind)
+        }
+        assertNull(CommitmentRules.evidence("我周五之前把方案发给春源", team).owner)
+        assertNull(CommitmentRules.evidence("请把报告发给春源，你下周一把报告交了", team).owner)
+    }
 
     @Test fun rulesRejectDatesRecipientsNegationQuotesAndCompletedWork() {
         listOf("明天天气怎么样", "我来不了", "不要让林春源提交", "他说我来做", "我已经提交了", "我明天提交吗？")
@@ -65,5 +83,31 @@ class UtteranceAnalysisTest {
         assertNull(old.request<String>("tag") { calls++; "unexpected" })
         assertEquals(1, calls)
         assertEquals("new", OptionalRequests().request("tag") { "new" })
+    }
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test fun boundedQueueDoesNotAllocateWorkUntilRunningAndCancellationReleasesCapacity() = runTest {
+        val policy = OptionalRequests(maxPending = 4)
+        val release = CompletableDeferred<Unit>()
+        var running = 0
+        val jobs = (1..4).map { async { policy.request("speaker") { running++; release.await(); "ok" } } }
+        runCurrent()
+        assertEquals(2, running)
+        var allocated = false
+        assertTrue(runCatching { policy.request("speaker") { allocated = true; "overflow" } }.exceptionOrNull() is OptionalRequests.QueueFull)
+        assertFalse(allocated)
+        assertEquals("tag", policy.request("tag") { "tag" }) // endpoint limits are independent
+        jobs.last().cancelAndJoin()
+        val replacement = async { policy.request("speaker") { running++; release.await(); "replacement" } }
+        runCurrent()
+        assertEquals(2, running)
+        release.complete(Unit)
+        jobs.take(3).forEach { assertEquals("ok", it.await()) }
+        assertEquals("replacement", replacement.await())
+        val slots = (1..4).map { requireNotNull(policy.tryReserve("speaker")) }
+        assertNull(policy.tryReserve("speaker"))
+        slots.forEach { it.close(); it.close() }
+        val next = (1..4).map { requireNotNull(policy.tryReserve("speaker")) }
+        next.forEach { it.close() }
     }
 }

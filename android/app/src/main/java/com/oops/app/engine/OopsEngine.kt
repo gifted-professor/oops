@@ -367,13 +367,19 @@ object OopsEngine {
     private fun tagUtterance(session: String, u: Utterance) {
         val client = api
         val policy = optionalRequests
-        val context = sessionIndex.snapshot().filter { it.startMs < u.startMs && it.id != u.id }.takeLast(4)
-        if (!sessionIndex.beginAnalysis(session, u.id)) return
+        val reservation = policy.tryReserve("tag") ?: run {
+            synchronized(pipeline) {
+                if (session == sessionId) _state.update { it.copy(analysisFailed = it.analysisFailed + 1) }
+            }
+            return
+        }
+        val context = sessionIndex.preceding(u.id, 4)
+        if (!sessionIndex.beginAnalysis(session, u.id)) { reservation.close(); return }
         publishSessionSummary(session)
         scope.launch(Dispatchers.IO) {
             try {
                 val request = com.oops.app.backend.TagRequest(session, u.toCandidate(), context.map { it.toCandidate() })
-                val result = policy.request("tag") { client.tagUtterance(request) }
+                val result = policy.request(reservation) { client.tagUtterance(request) }
                 synchronized(pipeline) {
                     if (session != sessionId) return@synchronized
                     if (result == null) {
@@ -407,19 +413,23 @@ object OopsEngine {
                 sessionIndex.finishAnalysis(session, u.id)
                 publishSessionSummary(session)
             }
-        }
+        }.invokeOnCompletion { reservation.close() }
     }
 
-    fun sessionSummary(): OopsEvent.SessionSummary = OopsEvent.SessionSummary(sessionIndex.sessionId,
-        sessionIndex.commitments(), sessionIndex.commitments().filter { sessionIndex.hasAudio(it.id) }.map { it.id }.toSet())
+    fun sessionSummary(): OopsEvent.SessionSummary {
+        val summary = sessionIndex.summary()
+        return OopsEvent.SessionSummary(summary.sessionId, summary.commitments, summary.audioIds)
+    }
 
     private fun publishSessionSummary(session: String) {
         synchronized(pipeline) {
             if (session != sessionId) return
             _state.update { it.copy(commitmentCount = sessionIndex.discoveredCommitments,
                 analysisPending = sessionIndex.pendingCount(), sessionTruncated = sessionIndex.truncated) }
-            emit(sessionSummary())
         }
+        // Copy/serialize the commitment list outside the audio pipeline lock.
+        val summary = sessionSummary()
+        if (summary.sessionId == session) emit(summary)
     }
 
     /** Asks the backend whose voice this sentence is; the caption gains a name when it answers. */
@@ -427,10 +437,17 @@ object OopsEngine {
         val client = api
         val policy = optionalRequests
         if (client is MockOopsApi || u.endMs - u.startMs < SPEAKER_MIN_MS) return
-        val pcm = ring.read(Pcm.msToSamples(u.startMs), Pcm.msToSamples(u.endMs)) ?: return
+        val reservation = policy.tryReserve("speaker") ?: return
         scope.launch(Dispatchers.IO) {
-            val result = runCatching { policy.request("speaker") { client.identifySpeaker(SpeakerRequest(session, u.id, pcm,
-                u.text, u.startMs, u.words, sessionIndex.neighbors(listOf(u.id)).filter { it.id != u.id }.map { it.toCandidate() })) } }
+            val result = runCatching { policy.request(reservation) {
+                // A queued job retains only text/id; PCM is copied only with an execution permit.
+                val pcm = synchronized(pipeline) {
+                    if (session != sessionId) null else ring.read(Pcm.msToSamples(u.startMs), Pcm.msToSamples(u.endMs))
+                }
+                    ?: return@request com.oops.app.backend.SpeakerResult(null, 0.0)
+                client.identifySpeaker(SpeakerRequest(session, u.id, pcm, u.text, u.startMs, u.words,
+                    sessionIndex.preceding(u.id, 4).map { it.toCandidate() }))
+            } }
                 .onFailure { Log.w(TAG, "speaker id failed for ${u.id}: ${it.message}") }
                 .getOrNull()
             if (result == null) return@launch
@@ -446,7 +463,7 @@ object OopsEngine {
                 }
             }
             publishSessionSummary(session)
-        }
+        }.invokeOnCompletion { reservation.close() }
     }
 
     private fun onAsrClosed(generation: Int, error: String?, fatal: Boolean) {

@@ -21,6 +21,7 @@ FOLDER = OUT / "split-check"
 TRUTH = OUT / "split-truth.json"
 FROZEN = OUT / "split-config.json"
 VALIDATION = OUT / "split-validation.json"
+MIN_SELF_HOLDOUT = 15
 
 
 def digest(value):
@@ -292,7 +293,7 @@ def metrics(cases, answers, predictions, jev=None):
 
 
 def gates(final, baseline):
-    owner_passed = (final["self_count"] > 0 and final["self_coverage"] >= .6 and final["self_claimed"] > 0
+    owner_passed = (final["self_count"] >= MIN_SELF_HOLDOUT and final["self_coverage"] >= .6 and final["self_claimed"] > 0
                     and (final["self_wrong"] == 0 if final["self_claimed"] <= 20 else final["self_accuracy"] >= .95))
     split_passed = (final["chars"] > 0 and final["char_accuracy"] >= baseline["char_accuracy"] + .1
                     and final["wrong_claim_rate"] <= min(.05, baseline["wrong_claim_rate"])
@@ -396,13 +397,13 @@ def evaluate(args):
     final = with_jev if keep_jev else pure
     split_passed, owner_passed = gates(final, baseline)
     self_cases = sum(answers[u["id"]].get("self_present") is True for u in manifest["cases"])
-    owner_passed = owner_passed and self_cases >= 15
     config = config | {"use_jev": keep_jev}
     report = {"schema": 1, "manifest_hash": manifest["hash"], "truth_hash": digest(truth),
               "fingerprints": split_fingerprints(),
               "holdout_count": len(holdout), "holdout_ids": [u["id"] for u in holdout],
               "split_passed": split_passed, "self_owner_passed": split_passed and owner_passed,
-              "labeled_self_count": self_cases, "required_self_count": 15,
+              "labeled_self_count": self_cases, "holdout_self_count": final["self_count"],
+              "required_holdout_self_count": MIN_SELF_HOLDOUT,
               "config": config, "baseline": baseline, "voiceprint": pure, "voiceprint_jev": with_jev,
               "jev_evaluated": bool(jev), "jev_retained": keep_jev,
               "limitations": "Demonstration sample, not a population-level 95% accuracy guarantee."}
