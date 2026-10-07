@@ -139,6 +139,12 @@ class MainActivity : ComponentActivity() {
         when (intent?.action) {
             ACTION_RECALL -> OopsEngine.triggerRecall("notification", intent.getStringExtra(EXTRA_QUERY))
             ACTION_DEBUG_START -> if (BuildConfig.DEBUG) {
+                // Scripted setup, e.g. --es remote 127.0.0.1:7790 --es backend http://127.0.0.1:8787 --ez mock false
+                val debugSettings = JSONObject()
+                intent.getStringExtra("remote")?.let { debugSettings.put("remoteAddress", it) }
+                intent.getStringExtra("backend")?.let { debugSettings.put("backendBaseUrl", it) }
+                if (intent.hasExtra("mock")) debugSettings.put("mockBackend", intent.getBooleanExtra("mock", true))
+                if (debugSettings.length() > 0) OopsEngine.applySettings(debugSettings)
                 if (intent.getBooleanExtra("builtin", false)) {
                     OopsEngine.selectTestWav("", "内置合成对话")
                 }

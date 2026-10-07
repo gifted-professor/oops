@@ -16,7 +16,14 @@ interface OopsApi {
     suspend fun confirmAction(request: ConfirmRequest): ActionResult
 
     suspend fun getAction(opId: String): ActionResult
+
+    /** Voiceprint lookup for one sentence's audio (16 kHz mono s16le); null when the backend can't tell. */
+    suspend fun identifySpeaker(request: SpeakerRequest): SpeakerResult? = null
 }
+
+class SpeakerRequest(val sessionId: String, val utteranceId: String, val pcm: ByteArray)
+
+data class SpeakerResult(val speaker: String?, val score: Double)
 
 data class Candidate(
     val id: String,

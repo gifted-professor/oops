@@ -23,3 +23,10 @@ test-media/
 scripts/__pycache__/
 evidence/
 讨论/
+
+# Local backend state: Feishu people map and the confirm journal
+.local-backend/
+
+# Voiceprint prototype: venv, downloaded models, enrolled embeddings
+.venv-voice/
+models/

@@ -8,4 +8,5 @@ fi
 ./android/gradlew -p android testDebugUnitTest assembleDebug "$@"
 node --check android/app/src/main/assets/web/app.js
 node --check android/app/src/main/assets/web/bridge-mock.js
-python3 -m py_compile scripts/prepare_test_audio.py scripts/device_wav_recall.py scripts/device_stability.py scripts/jev_probe.py scripts/analyze_stability.py scripts/local_api_fixture.py
+python3 -m py_compile scripts/prepare_test_audio.py scripts/device_wav_recall.py scripts/device_stability.py scripts/jev_probe.py scripts/analyze_stability.py scripts/local_api_fixture.py scripts/mac_audio_bridge.py scripts/local_backend.py scripts/voiceprint.py
+python3 scripts/local_backend.py --self-test

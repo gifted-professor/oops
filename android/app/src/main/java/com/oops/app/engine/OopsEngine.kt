@@ -9,6 +9,7 @@ import com.oops.app.asr.VolcAsrClient
 import com.oops.app.asr.VolcRequest
 import com.oops.app.audio.AudioSource
 import com.oops.app.audio.MicAudioSource
+import com.oops.app.audio.RemoteAudioSource
 import com.oops.app.audio.WavFileAudioSource
 import com.oops.app.backend.ActionDraft
 import com.oops.app.backend.ActionWorkflow
@@ -21,6 +22,7 @@ import com.oops.app.backend.MockOopsApi
 import com.oops.app.backend.OopsApi
 import com.oops.app.backend.RecallRequest
 import com.oops.app.backend.RecallResponse
+import com.oops.app.backend.SpeakerRequest
 import com.oops.app.backend.toCandidate
 import com.oops.app.buffer.AudioRingBuffer
 import com.oops.app.buffer.TranscriptBuffer
@@ -69,6 +71,8 @@ object OopsEngine {
     private const val TAG = "Oops"
     const val RETENTION_MS = 5 * 60_000L
     private const val CLIP_PAD_MS = 500L
+    /** Shorter sentences carry too little voice to identify reliably. */
+    private const val SPEAKER_MIN_MS = 1_000L
     private const val TEST_WAV = "test/dialog.wav"
 
     private lateinit var app: Application
@@ -139,7 +143,14 @@ object OopsEngine {
             opIds[draft.draftId] = operation.request.opId
         }
         rebuildApi()
-        _state.update { it.copy(source = settings.source, savedCount = store.count(), testWavName = settings.testWavName) }
+        _state.update {
+            it.copy(
+                source = settings.source,
+                savedCount = store.count(),
+                testWavName = settings.testWavName,
+                remoteAddress = settings.remoteAddress,
+            )
+        }
     }
 
     // ---- capture -------------------------------------------------------------------------
@@ -155,19 +166,23 @@ object OopsEngine {
             sessionId = UUID.randomUUID().toString()
             reconnectAttempt = 0
             asrDownSinceMs = null
-            val src = if (kind == Settings.SOURCE_WAV) {
-                WavFileAudioSource {
+            val src = when (kind) {
+                Settings.SOURCE_WAV -> WavFileAudioSource {
                     val uri = settings.testWavUri
                     if (uri.isBlank()) app.assets.open(TEST_WAV)
                     else requireNotNull(app.contentResolver.openInputStream(uri.toUri())) { "无法打开测试 WAV" }
                 }
-            } else {
-                MicAudioSource()
+                Settings.SOURCE_REMOTE -> {
+                    val (host, port) = Settings.parseAddress(settings.remoteAddress)
+                        ?: ("127.0.0.1" to RemoteAudioSource.DEFAULT_PORT)
+                    RemoteAudioSource(host, port)
+                }
+                else -> MicAudioSource()
             }
             _state.update {
                 it.copy(
                     capturing = true, source = kind, sessionId = sessionId, sessionMs = 0, bufferedMs = 0,
-                    asr = "connecting", asrDetail = null, asrGaps = emptyList(),
+                    asr = "connecting", asrDetail = null, asrGaps = emptyList(), sourceDetail = null,
                 )
             }
             try {
@@ -179,7 +194,7 @@ object OopsEngine {
                 source = null
                 asr?.cancel()
                 asr = null
-                _state.update { it.copy(capturing = false, asr = "off") }
+                _state.update { it.copy(capturing = false, asr = "off", sourceDetail = null) }
                 fail("capture", "无法开始收音：${e.message}")
                 CaptureService.stop(app)
                 return
@@ -209,7 +224,7 @@ object OopsEngine {
         tickJob?.cancel()
         player.stop()
         level = 0f
-        _state.update { it.copy(capturing = false, level = 0f, asr = if (client != null) it.asr else "off") }
+        _state.update { it.copy(capturing = false, level = 0f, sourceDetail = null, asr = if (client != null) it.asr else "off") }
         if (client != null) {
             scope.launch {
                 delay(5_000)
@@ -250,6 +265,11 @@ object OopsEngine {
                 asr = null
                 openAsrLocked()
             }
+        }
+
+        override fun onStatus(detail: String?) {
+            if (detail != _state.value.sourceDetail) Log.i(TAG, "source: ${detail ?: "-"}")
+            _state.update { if (it.capturing) it.copy(sourceDetail = detail) else it }
         }
 
         override fun onError(error: Throwable) {
@@ -330,6 +350,25 @@ object OopsEngine {
         val u = transcript.add(baseMs + raw.startMs, baseMs + raw.endMs, raw.text, raw.speakerId)
         Log.i(TAG, "final ${u.id} [${u.startMs}-${u.endMs}] ${u.text}")
         emit(OopsEvent.Final(u))
+        identifySpeaker(session, u)
+    }
+
+    /** Asks the backend whose voice this sentence is; the caption gains a name when it answers. */
+    private fun identifySpeaker(session: String, u: Utterance) {
+        val client = api
+        if (client is MockOopsApi || u.endMs - u.startMs < SPEAKER_MIN_MS) return
+        val pcm = ring.read(Pcm.msToSamples(u.startMs), Pcm.msToSamples(u.endMs)) ?: return
+        scope.launch(Dispatchers.IO) {
+            val result = runCatching { client.identifySpeaker(SpeakerRequest(session, u.id, pcm)) }
+                .onFailure { Log.w(TAG, "speaker id failed for ${u.id}: ${it.message}") }
+                .getOrNull()
+            val name = result?.speaker ?: return@launch
+            if (session != sessionId) return@launch
+            transcript.setSpeaker(u.id, name)?.let {
+                Log.i(TAG, "speaker ${u.id} = $name (${"%.2f".format(result.score)})")
+                emit(OopsEvent.SpeakerIdentified(u.id, name, result.score))
+            }
+        }
     }
 
     private fun onAsrClosed(generation: Int, error: String?, fatal: Boolean) {
@@ -656,6 +695,11 @@ object OopsEngine {
 
     fun applySettings(json: JSONObject) {
         if (json.has("source")) settings.source = json.getString("source")
+        if (json.has("remoteAddress")) {
+            val address = json.getString("remoteAddress").trim()
+            if (Settings.parseAddress(address) != null) settings.remoteAddress = address
+            else fail("settings", "Mac 收音地址格式应为 主机:端口，例如 127.0.0.1:7790")
+        }
         if (json.has("backendBaseUrl")) settings.backendBaseUrl = json.getString("backendBaseUrl")
         if (json.has("mockBackend")) settings.mockBackend = json.getBoolean("mockBackend")
         val url = settings.backendBaseUrl
@@ -679,6 +723,7 @@ object OopsEngine {
                 backendUrl = url,
                 speakerInfo = settings.speakerInfo,
                 source = if (it.capturing) it.source else settings.source,
+                remoteAddress = settings.remoteAddress,
             )
         }
     }

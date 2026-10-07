@@ -83,6 +83,15 @@ object ApiJson {
         )
     }
 
+    fun speakerRequest(r: SpeakerRequest): JSONObject = JSONObject()
+        .put("session_id", r.sessionId)
+        .put("utterance_id", r.utteranceId)
+        .put("sample_rate", 16000)
+        .put("pcm_base64", java.util.Base64.getEncoder().encodeToString(r.pcm))
+
+    fun speakerResult(json: JSONObject): SpeakerResult =
+        SpeakerResult(json.stringOrNull("speaker"), json.optDouble("score", 0.0))
+
     private fun JSONObject.stringOrNull(key: String): String? =
         if (isNull(key)) null else optString(key).takeIf { it.isNotEmpty() }
 }

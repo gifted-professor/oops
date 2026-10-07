@@ -23,6 +23,9 @@ data class EngineState(
     val backendUrl: String = "",
     val speakerInfo: Boolean = false,
     val testWavName: String = "内置合成对话",
+    /** Live state of an external source, e.g. "Mac 收音：Wireless microphone". */
+    val sourceDetail: String? = null,
+    val remoteAddress: String = "127.0.0.1:7790",
     /** Session spans that were recorded but not transcribed (ASR down). */
     val asrGaps: List<AsrGap> = emptyList(),
 )
@@ -30,6 +33,7 @@ data class EngineState(
 sealed interface OopsEvent {
     data class Partial(val text: String, val startMs: Long, val endMs: Long) : OopsEvent
     data class Final(val utterance: Utterance) : OopsEvent
+    data class SpeakerIdentified(val utteranceId: String, val speaker: String, val score: Double) : OopsEvent
     data class Pruned(val ids: List<String>) : OopsEvent
     data class RecallPending(val trigger: String) : OopsEvent
     data class RecallReady(val card: RecallCard) : OopsEvent

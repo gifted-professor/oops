@@ -17,7 +17,7 @@
   const state = { capturing: false, sessionId: '', source: 'wav', sessionMs: 0, bufferedMs: 0,
     retentionMs: 300000, asr: 'off', asrDetail: null, level: 0, playing: false,
     savedCount: saved.length, backend: 'mock', backendUrl: '', speakerInfo: false,
-    testWavName: '内置合成对话（浏览器模拟）', asrGaps: [] };
+    testWavName: '内置合成对话（浏览器模拟）', asrGaps: [], sourceDetail: null, remoteAddress: '127.0.0.1:7790' };
   const bridge = { onmessage: null, postMessage: (raw) => {
     try { const { type, payload = {} } = JSON.parse(raw); handle(type, payload); }
     catch (e) { emit('error', { scope: 'mock', message: e.message }); }
@@ -126,6 +126,7 @@
       }
       case 'settings.set':
         state.source = p.source || state.source;state.backendUrl = p.backendBaseUrl || '';state.speakerInfo = !!p.speakerInfo;
+        state.remoteAddress = p.remoteAddress || state.remoteAddress;
         emit('state', { ...state });emit('toast', { message: '浏览器只模拟后端；真实配置请在 Android App 中设置' });break;
       case 'testAudio.pick': emit('toast', { message: '外部 WAV 导入请在 Android App 中使用' });break;
       case 'testAudio.reset': state.testWavName = '内置合成对话（浏览器模拟）';emit('state', { ...state });break;

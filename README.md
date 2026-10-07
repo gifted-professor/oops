@@ -132,3 +132,19 @@ LAS 的三个算子为异步录音文件识别，只接收公网 URL／TOS 路�
 A：软件收尾＋USB 真机麦克风／WAV＋30 分钟运行。B：真实后端和飞书行动闭环。C：录音豆 SDK/license。D：门控、语音 Oops、承诺发现和当事人确认。E/F：长时间、准确率验收和现场准备。各项实际状态见 `docs/validation.md`，不把 Mock 成功当作真实飞书写入。
 
 本机 HTTP 故障联调（不调用飞书）：`python3 scripts/local_api_fixture.py --scenario drop-response-once`，或 `--scenario reject-once`。手机使用 `adb reverse tcp:8766 tcp:8766`，在 App 设置填 `http://127.0.0.1:8766` 并关闭 Mock。前者模拟已创建但响应丢失；后者模拟未接收确认后失败。`/_test/operations` 可核对同一 op_id 的请求、次数与创建数。结束后恢复 Mock 并执行 `adb reverse --remove tcp:8766`。
+
+## Mac mini 收音 + 本地飞书后端
+
+手机插着 USB 调试时没法再接麦克风，所以把收音放到 Mac mini：Hollyland 无线麦接收器插在 Mac 上，`scripts/mac_audio_bridge.py` 用 ffmpeg 持续采集，转成 16 kHz 单声道 PCM，经 `adb reverse` 走 USB 推给 App 的「Mac 收音」音源（`RemoteAudioSource`）。它和以后的录音豆走同一条外接设备链路：断线自动重连并补缺口，回车 = 双击召回。
+
+`scripts/local_backend.py` 按 `docs/api.md` 实现四个接口：召回用 Jev（`.jev.env`），草稿的事项／截止／约束用规则、负责人由 Jev 在团队名单里选；确认后以 `lark-cli` 当前授权用户的身份创建真实飞书任务，`client_token` = op_id，先落盘再写飞书，建完回读核验。只监听 127.0.0.1。
+
+```sh
+python3 scripts/local_backend.py --resolve-people   # 一次：团队姓名 → 飞书 open_id，结果在 .local-backend/people.json
+python3 scripts/local_backend.py                     # 终端 1；--feishu dry-run 不写飞书
+python3 scripts/mac_audio_bridge.py --adb-reverse    # 终端 2；--list 看设备，--wav 文件 用测试音频代替真人
+adb reverse tcp:8787 tcp:8787
+adb shell am start -n com.oops.app/.MainActivity -a com.oops.app.action.DEBUG_START \
+  --es source remote --es remote 127.0.0.1:7790 --es backend http://127.0.0.1:8787 --ez mock false
+```
+也可以在 App 调试设置里手动选「Mac 收音」、填后端地址并关闭 Mock。通讯录里找不到的负责人（如 Jason）建给授权用户本人，原定负责人写进任务描述。首次采集时 macOS 会请求麦克风权限。

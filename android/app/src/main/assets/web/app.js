@@ -19,7 +19,7 @@
     reconnecting: ['识别重连中…', 'warn'],
     error: ['识别出错', 'bad'],
   };
-  const SOURCE_TEXT = { mic: '手机麦克风', wav: '测试音频' };
+  const SOURCE_TEXT = { mic: '手机麦克风', wav: '测试音频', remote: 'Mac 收音' };
 
   const S = {
     state: { capturing: false, sessionMs: 0, bufferedMs: 0, retentionMs: 300000, asr: 'off', level: 0, savedCount: 0, asrGaps: [] },
@@ -101,6 +101,7 @@
         $('partial').textContent = '';
         addLine(p);
         break;
+      case 'asr.speaker': setLineSpeaker(p.id, p.speaker); break;
       case 'transcript.pruned':
         (p.ids || []).forEach(removeLine);
         $('pruned-note').hidden = false;
@@ -156,7 +157,9 @@
     const s = S.state;
     $('pill').classList.toggle('on', !!s.capturing);
     $('capture-text').textContent = s.capturing ? '收音中' : '未收音';
-    $('source-text').textContent = SOURCE_TEXT[s.source] || s.source || '';
+    const sourceLabel = SOURCE_TEXT[s.source] || s.source || '';
+    // External sources report their link state (e.g. "Mac 收音：Wireless microphone").
+    $('source-text').textContent = s.capturing && s.sourceDetail ? s.sourceDetail : sourceLabel;
     $('level').style.width = `${Math.round((s.capturing ? s.level : 0) * 100)}%`;
     $('buffer-text').textContent = `缓存 ${clock(s.bufferedMs)} / ${clock(s.retentionMs)}`;
     const [text, cls] = ASR_TEXT[s.asr] || [s.asr, ''];
@@ -206,6 +209,20 @@
     S.lines.set(u.id, li);
     $('empty').hidden = true;
     scrollToEnd();
+  }
+
+  /** The voiceprint answer arrives after the caption; add or replace the name chip in place. */
+  function setLineSpeaker(id, speaker) {
+    const li = S.lines.get(id);
+    if (!li) return;
+    const text = li.querySelector('div');
+    let chip = text.querySelector('.spk');
+    if (!chip) {
+      chip = document.createElement('span');
+      chip.className = 'spk';
+      text.prepend(chip);
+    }
+    chip.textContent = speakerLabel(speaker);
   }
 
   function removeLine(id) {
@@ -472,7 +489,9 @@
         <select id="set-source">
           <option value="mic" ${s.source === 'mic' ? 'selected' : ''}>手机麦克风</option>
           <option value="wav" ${s.source === 'wav' ? 'selected' : ''}>测试 WAV（预录音频）</option>
+          <option value="remote" ${s.source === 'remote' ? 'selected' : ''}>Mac 收音（经 USB 接收电脑上的麦克风）</option>
         </select></label>
+      <label class="field"><span>Mac 收音地址（配合 adb reverse 用 127.0.0.1）</span><input id="set-remote" inputmode="url" placeholder="127.0.0.1:7790" value="${esc(s.remoteAddress || '127.0.0.1:7790')}"></label>
       <p class="fine">测试音频：${esc(s.testWavName || '内置合成对话')} · 需要 PCM 16kHz / 单声道 / 16bit WAV</p>
       <div class="row"><button class="chip" data-act="pick-audio">选择测试 WAV</button><button class="chip ghost" data-act="reset-audio">恢复内置音频</button></div>
       <label class="switch"><span>使用 Mock 后端</span><input type="checkbox" id="set-mock" ${s.backend === 'mock' ? 'checked' : ''}></label>
@@ -492,6 +511,7 @@
     const s = S.state;
     return [
       `session  ${clock(s.sessionMs)}   buffer ${clock(s.bufferedMs)}`,
+      `source   ${s.source}${s.sourceDetail ? ` — ${s.sourceDetail}` : ''}`,
       `asr      ${s.asr}${s.asrDetail ? ` — ${s.asrDetail}` : ''}`,
       `backend  ${s.backend}${s.backend === 'http' ? ` ${s.backendUrl}` : ''}`,
       `gaps     ${(s.asrGaps || []).length}`,
@@ -501,6 +521,7 @@
   function applySettings() {
     send('settings.set', {
       source: $('set-source').value,
+      remoteAddress: $('set-remote').value.trim(),
       mockBackend: $('set-mock').checked,
       backendBaseUrl: $('set-url').value.trim(),
       speakerInfo: $('set-spk').checked,

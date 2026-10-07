@@ -22,6 +22,9 @@ interface AudioSource {
         /** The source lost [missingMs] of audio (e.g. Bluetooth dropped); the timeline must still advance. */
         fun onGap(missingMs: Long) {}
 
+        /** Connection state shown to the user, e.g. "等待 Mac 收音连接"; null clears it. */
+        fun onStatus(detail: String?) {}
+
         fun onError(error: Throwable)
     }
 

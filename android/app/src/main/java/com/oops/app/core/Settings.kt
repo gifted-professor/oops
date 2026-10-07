@@ -26,6 +26,11 @@ class Settings(context: Context) {
         get() = prefs.getString(KEY_SOURCE, SOURCE_MIC) ?: SOURCE_MIC
         set(value) = prefs.edit { putString(KEY_SOURCE, value) }
 
+    /** Where [com.oops.app.audio.RemoteAudioSource] connects; 127.0.0.1 rides `adb reverse` over USB. */
+    var remoteAddress: String
+        get() = prefs.getString(KEY_REMOTE, DEFAULT_REMOTE_ADDRESS) ?: DEFAULT_REMOTE_ADDRESS
+        set(value) = prefs.edit { putString(KEY_REMOTE, value.trim()) }
+
     var testWavUri: String
         get() = prefs.getString("test_wav_uri", "").orEmpty()
         set(value) = prefs.edit { putString("test_wav_uri", value) }
@@ -45,6 +50,15 @@ class Settings(context: Context) {
     companion object {
         const val SOURCE_MIC = "mic"
         const val SOURCE_WAV = "wav"
+        const val SOURCE_REMOTE = "remote"
+        const val DEFAULT_REMOTE_ADDRESS = "127.0.0.1:7790"
+
+        /** "host:port" → pair, or null when malformed. */
+        fun parseAddress(address: String): Pair<String, Int>? {
+            val host = address.substringBeforeLast(':', "").trim()
+            val port = address.substringAfterLast(':', "").trim().toIntOrNull()
+            return if (host.isNotEmpty() && port != null && port in 1..65535) host to port else null
+        }
 
         /** 预置团队成员（24h 原型：负责人从这里选，不接飞书通讯录）。Also used as ASR hotwords. */
         val TEAM = listOf("Jason", "黄丽萍", "江古月", "洪玉麟", "林春源")
@@ -54,5 +68,6 @@ class Settings(context: Context) {
         private const val KEY_URL = "backend_base_url"
         private const val KEY_SPEAKER = "speaker_info"
         private const val KEY_SOURCE = "source"
+        private const val KEY_REMOTE = "remote_address"
     }
 }

@@ -30,6 +30,8 @@ object BridgeJson {
         .put("backendUrl", s.backendUrl)
         .put("speakerInfo", s.speakerInfo)
         .put("testWavName", s.testWavName)
+        .put("sourceDetail", s.sourceDetail ?: NULL)
+        .put("remoteAddress", s.remoteAddress)
         .put("asrGaps", JSONArray(s.asrGaps.map { JSONObject().put("fromMs", it.fromMs).put("toMs", it.toMs) }))
 
     fun utterance(u: Utterance): JSONObject = JSONObject()
@@ -94,6 +96,8 @@ object BridgeJson {
         is OopsEvent.Partial ->
             "asr.partial" to JSONObject().put("text", e.text).put("startMs", e.startMs).put("endMs", e.endMs)
         is OopsEvent.Final -> "asr.final" to utterance(e.utterance)
+        is OopsEvent.SpeakerIdentified ->
+            "asr.speaker" to JSONObject().put("id", e.utteranceId).put("speaker", e.speaker).put("score", e.score)
         is OopsEvent.Pruned -> "transcript.pruned" to JSONObject().put("ids", JSONArray(e.ids))
         is OopsEvent.RecallPending -> "recall.pending" to JSONObject().put("trigger", e.trigger)
         is OopsEvent.RecallReady -> "recall.card" to card(e.card)

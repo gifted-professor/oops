@@ -29,6 +29,14 @@ class TranscriptBuffer(private val retentionMs: Long) {
     @Synchronized
     fun get(id: String): Utterance? = items.firstOrNull { it.id == id }
 
+    /** Fills in who said it once the voiceprint lookup returns; null if the sentence already expired. */
+    @Synchronized
+    fun setSpeaker(id: String, speaker: String): Utterance? {
+        val index = items.indexOfFirst { it.id == id }
+        if (index < 0) return null
+        return items[index].copy(speaker = speaker).also { items[index] = it }
+    }
+
     @Synchronized
     fun snapshot(): List<Utterance> = items.toList()
 
