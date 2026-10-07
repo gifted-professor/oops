@@ -8,6 +8,13 @@ object OopsCommand {
     private val WAKE = Regex("(?i)oops|欧普斯|哦普斯|奥普斯")
 
     private val RECALL_DIRECTIVE = Regex("(?:^|[，。,.])(?:好的[，,]?)?把?(?:刚刚|刚才)(?:那个|这个|的)?(?:想法|原话|那句话|那句|承诺|方案)(?:留下来|记下来|保存下来|找回来)[。.!！]?$", RegexOption.IGNORE_CASE)
+    data class Voice(val query: String?, val ask: Boolean)
+    fun parseVoice(text: String): Voice? {
+        if (!matches(text)) return null
+        if (!containsWake(text)) return Voice(null, false)
+        val query = WAKE.replace(text, "").trim(' ', '，', ',', '。', '.', '！', '!')
+        return Voice(query.takeIf { it.isNotBlank() }, Regex("吗|什么|多少|谁|哪|怎么|为何|是否|[？?]").containsMatchIn(query))
+    }
     fun containsWake(text: String) = WAKE.containsMatchIn(text)
     fun matches(text: String) = containsWake(text) || RECALL_DIRECTIVE.containsMatchIn(text)
 }
@@ -61,6 +68,7 @@ data class CardItem(
     val text: String,
     val speaker: String?,
     val prob: Double,
+    val audioAvailable: Boolean = true,
 )
 
 /** A recall result shown to the user. Text always comes from the ASR original, never the backend. */

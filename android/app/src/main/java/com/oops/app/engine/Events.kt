@@ -37,6 +37,14 @@ data class EngineState(
     val remoteAddress: String = "127.0.0.1:7790",
     /** Session spans that were recorded but not transcribed (ASR down). */
     val asrGaps: List<AsrGap> = emptyList(),
+    val digestCounts: Map<String, Int> = emptyMap(),
+    val agenda: JSONObject = JSONObject(),
+    val notices: List<JSONObject> = emptyList(),
+    val voiceTrigger: Boolean = true,
+    val noticeVibrate: Boolean = true,
+    val memorySync: Boolean = true,
+    val syncStatus: String = "idle",
+    val syncPending: Int = 0,
     val commitmentCount: Int = 0,
     val analysisPending: Int = 0,
     val analysisFailed: Int = 0,
@@ -52,6 +60,7 @@ data class VoiceprintState(
 )
 
 sealed interface OopsEvent {
+    data class Json(val type: String, val payload: JSONObject) : OopsEvent
     data class Partial(val text: String, val startMs: Long, val endMs: Long) : OopsEvent
     data class Final(val utterance: Utterance) : OopsEvent
     data class SpeakerIdentified(val utteranceId: String, val speaker: String?, val score: Double?,
@@ -59,7 +68,8 @@ sealed interface OopsEvent {
         val speakerState: String = if (speaker != null) "matched" else "unconfirmed",
         val preview: com.oops.app.buffer.SpeakerPreview? = null) : OopsEvent
     data class UtteranceTagged(val utterance: Utterance) : OopsEvent
-    data class SessionSummary(val sessionId: String, val commitments: List<Utterance>, val audioIds: Set<String>) : OopsEvent
+    data class SessionSummary(val sessionId: String, val commitments: List<Utterance>, val audioIds: Set<String>,
+        val grouped: Map<String, List<Utterance>> = emptyMap(), val hints: Map<String, JSONObject> = emptyMap(), val notices: List<JSONObject> = emptyList()) : OopsEvent
     data class Pruned(val ids: List<String>) : OopsEvent
     data class RecallPending(val trigger: String) : OopsEvent
     data class RecallReady(val card: RecallCard) : OopsEvent

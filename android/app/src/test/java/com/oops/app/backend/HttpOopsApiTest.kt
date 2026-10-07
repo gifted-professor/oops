@@ -9,6 +9,16 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class HttpOopsApiTest {
+    @Test fun oldServerDisablesNoticesAndMeetingsWithoutFailingRecall() = runTest {
+        withServer(404, "{}") { api ->
+            val policy = OptionalRequests()
+            var calls = 0
+            repeat(2) { assertNull(policy.request("notice") { calls++; api.notice(org.json.JSONObject().put("kind", "topic")) }) }
+            assertEquals(1, calls)
+            assertNull(api.syncMeeting(org.json.JSONObject()))
+            assertNull(api.historyList())
+        }
+    }
     @Test fun credentialsReachStatusAndOptionalAnalysisRequests() = runTest {
         val headers = mutableListOf<String?>()
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)

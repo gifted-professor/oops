@@ -26,6 +26,7 @@
     lines: new Map(), // utterance id → <li>
     records: new Map(),
     commitments: [],
+    summary: {}, history: null, historySummary: {}, notices: new Map(), activeNotices: [],
     sheet: null, // { kind, ... }
     card: null, // { data, sel, before, after }
     draft: null, // { data, status: editing|sending|done, result, error }
@@ -96,6 +97,11 @@
         }
         break;
       case 'state': setState(p); break;
+      case 'notice': showNotice(p); break;
+      case 'history.list': openSheet({kind: 'history', items: p.items || []}); break;
+      case 'history.open': historyOpen(p); break;
+      case 'history.delete': toast('会议文字已删除'); send('history.list'); break;
+      case 'history.search': historySearch(p); break;
       case 'voiceprint.open': openSheet({kind: 'voiceprint'}); break;
       case 'insets': applyInsets(p); break;
       case 'asr.partial':
@@ -156,6 +162,7 @@
     const previousVoiceprint = JSON.stringify(S.state.voiceprint);
     const previousPreview = S.state.speakerPreviewEnabled;
     S.state = { ...S.state, ...s };
+    if (s.notices) { s.notices.forEach(n => S.notices.set(n.id, n)); renderNoticeBanners(); }
     if (previousPreview !== S.state.speakerPreviewEnabled) S.records.forEach((_, id) => renderLine(id));
     if (S.sheet?.kind === 'voiceprint' && previousVoiceprint !== JSON.stringify(S.state.voiceprint)) renderSheet();
     renderStatus();
@@ -165,7 +172,7 @@
     $('lines').innerHTML = '';
     S.lines.clear();
     S.records.clear();
-    S.commitments = [];
+    S.commitments = []; S.summary = {}; S.notices.clear(); S.activeNotices = []; renderNoticeBanners();
     $('partial').textContent = '';
     $('pruned-note').hidden = true;
     $('empty').hidden = false;
@@ -213,11 +220,16 @@
     capture.classList.toggle('stop', !!s.capturing);
     $('saved-count').textContent = s.savedCount ?? 0;
     const commitments = $('btn-commitments');
-    commitments.hidden = !!s.capturing || !s.sessionId ||
-      (!(s.analysisPending || s.analysisFailed || s.commitmentCount) && s.tagsSupported == null);
-    commitments.textContent = s.tagsSupported === false ? '当前后端不支持承诺分析' :
-      `本场发现 ${s.commitmentCount || 0} 个承诺${s.analysisPending ? ` · 另有 ${s.analysisPending} 句还在分析` : ''}${s.analysisFailed ? ` · ${s.analysisFailed} 句分析失败` : ''}`;
-    commitments.disabled = !S.commitments.length;
+    commitments.hidden = !s.sessionId;
+    const counts = s.digestCounts || {};
+    commitments.textContent = `本场纪要 · 决定 ${counts.decision || 0} · 待办 ${counts.commitment || 0} · 约束 ${counts.constraint || 0}`;
+    commitments.disabled = false;
+    const a = s.agenda || {};
+    const current = (a.items || []).find(i => i.id === a.currentItemId);
+    const covered = (a.items || []).filter(i => i.coveredMs > 0).length;
+    $('btn-agenda').textContent = a.goal || a.items?.length ? `议程 ${covered}/${a.items?.length || 0} · ${current?.title || a.goal || '等待讨论'} · ${clock(s.sessionMs)}${a.plannedMs ? '/' + clock(a.plannedMs) : ''}` : '＋本场目标与议程';
+    $('agenda-note').textContent = a.tracking === 'unsupported' ? '当前后端仅支持时间提醒' : '';
+    $('sync-note').textContent = !s.memorySync ? '会议文字同步已关闭' : s.syncStatus === 'failed' ? '文字同步已停止，请检查服务器或删除状态' : s.syncStatus === 'unsupported' ? '当前后端不支持会议文字同步' : s.sessionId ? `文字同步到团队服务器 · ${s.syncStatus === 'retrying' ? '等待重试 · ' : ''}待同步 ${s.syncPending || 0}` : '';
 
     if (S.sheet?.kind === 'settings') {
       const diag = $('diag');
@@ -282,7 +294,7 @@
 
   function setSummary(p) {
     if (p.sessionId !== S.state.sessionId) return;
-    S.commitments = p.commitments || [];
+    S.summary = p; S.commitments = p.commitments || [];
     renderStatus();
     if (S.sheet?.kind === 'commitments') renderSheet();
   }
@@ -357,6 +369,11 @@
       voiceprint: voiceprintHtml,
       saved: savedHtml,
       commitments: commitmentsHtml,
+      historyDigest: () => commitmentsHtml(true),
+      ask: askHtml,
+      agenda: agendaHtml,
+      history: historyHtml,
+      notices: () => sheetHead('提醒记录') + noticeRecordsHtml([...S.notices.values()]),
     }[k];
     $('sheet').innerHTML = html ? html() : '';
     syncPlayButtons();
@@ -365,11 +382,20 @@
   const spinnerHtml = (title, sub) =>
     `<div class="grabber"></div><div class="center"><div class="spinner"></div><p style="margin:0">${title}</p><p class="fine">${sub}</p></div>`;
 
-  function commitmentsHtml() {
-    return `<div class="grabber"></div><div class="sheet-head"><span class="kicker">本场承诺与指派</span><button class="close" data-act="close" aria-label="关闭">✕</button></div>
-      ${S.state.sessionTruncated ? '<p class="fine">本场文字索引已达上限，较早条目已移出列表。</p>' : ''}
-      <div class="cands">${S.commitments.map((u) => `<button class="cand" data-act="commitment-open" data-id="${esc(u.id)}"><span><span class="t">${esc(u.text)}</span><span class="meta">${clock(u.startMs)}${u.speaker ? ` · ${esc(speakerLabel(u.speaker))}` : ''}${u.audioExpired ? ' · 原声未保留' : ''}</span></span></button>`).join('')}</div>
-      <p class="footnote">本场内容保存在内存中，下次收音或退出进程后清除。原声最多暂存 50 段。</p>`;
+  function commitmentsHtml(readonly = false) {
+    const summary = readonly ? S.historySummary : S.summary;
+    function group(title, rows, todo = false, ideas = false) {
+      return `<p class="section-title">${title} · ${rows.length}</p><div class="cands">${(ideas ? rows.slice(0, S.showAllIdeas ? rows.length : 5) : rows).map(u => {
+        const hint = todo ? `${u.ownerHint || u.owner_hint || '负责人待定'} · ${u.whenRaw || u.when_raw || '截止待定'}${u.taskStatus === 'created' || u.task_status === 'created' ? ' · 已建飞书任务' : ''}` : '';
+        return `<button class="cand" data-act="${readonly ? 'history-quote' : 'commitment-open'}" data-id="${esc(u.id)}"><span><span class="t">${esc(u.text)}</span><span class="meta">${clock(u.startMs ?? u.start_ms)}${u.speaker ? ' · ' + esc(speakerLabel(u.speaker)) : ''}${hint ? '<br>' + esc(hint) : ''}${u.audioExpired || readonly ? ' · 原声未保留' : ''}</span></span></button>`;
+      }).join('') || '<p class="fine">暂无</p>'}</div>${ideas && rows.length > 5 && !S.showAllIdeas ? '<button class="chip ghost" data-act="ideas-all">展开全部想法</button>' : ''}`;
+    }
+    return `${sheetHead(readonly ? '往期会议 · ' + formatDate(S.history.started_at) : '本场纪要')}
+      ${!readonly && S.state.tagsSupported === false ? '<p class="fine">当前后端不支持标签分析。</p>' : ''}
+      ${!readonly && S.state.sessionTruncated ? '<p class="fine">文字索引已达上限，较早条目已移出。</p>' : ''}
+      ${group('决定', summary.decisions || [])}${group('待办', summary.commitments || [], true)}${group('约束', summary.constraints || [])}${group('想法', summary.ideas || [], false, true)}
+      <p class="section-title">提醒记录</p>${noticeRecordsHtml(summary.notices || [], readonly)}
+      ${readonly ? `<button class="btn ghost" data-act="history-delete-prompt">删除此会议文字</button>${S.sheet.deleteConfirm ? '<p class="fine">团队成员将无法再查看这场会议。确认删除？</p><button class="btn ghost" data-act="history-delete-confirm">确认删除</button>' : ''}` : '<p class="footnote">本场索引保留到下次收音。开启文字同步后可在往期会议查看；原声最多暂存 50 段。</p>'}`;
   }
 
   function notFoundHtml() {
@@ -409,41 +435,41 @@
     const d = c.data;
     const item = d.items[c.sel];
     const idx = d.pool.findIndex((u) => u.id === item.id);
-    const canPrev = idx - c.before > 0;
-    const canNext = idx + c.after < d.pool.length - 1;
+    const canPrev = !d.readOnly && idx - c.before > 0;
+    const canNext = !d.readOnly && idx + c.after < d.pool.length - 1;
     const quote = selected().map((u) => (u.id === item.id ? esc(u.text) : `<span class="ctx">${esc(u.text)}</span>`)).join(' ');
     const range = selectedRange();
     const speaker = speakerLabel(item.speaker);
     const candidates = d.single ? '' : `
-      <p class="fine" style="margin:0">有 ${d.items.length} 条接近，选一条：</p>
+      <p class="fine" style="margin:0">${d.trigger === 'conflict' ? '对照这两句原话：' : `有 ${d.items.length} 条接近，选一条：`}</p>
       <div class="cands">${d.items.map((it, i) => `
         <button class="cand ${i === c.sel ? 'on' : ''}" data-act="cand" data-i="${i}">
           <span class="radio"></span>
           <span><span class="t">${esc(it.text)}</span>
-            <span class="meta"><span>${clock(it.startMs)}</span>${it.speaker != null ? `<span>${esc(speakerLabel(it.speaker))}</span>` : ''}</span>
+            <span class="meta"><span>${it.startedAt ? esc(formatDate(it.startedAt)) + ' 会议 · ' : ''}${clock(it.startMs)}</span>${it.speaker != null ? `<span>${esc(speakerLabel(it.speaker))}</span>` : ''}</span>
             <span class="prob"><i style="width:${Math.round(it.prob * 100)}%"></i></span></span>
         </button>`).join('')}
       </div>`;
     return `<div class="grabber"></div>
       <div class="sheet-head">
-        <span class="kicker">Recall · <span id="card-ago">${ago(S.state.sessionMs - item.endMs)}</span></span>
+        <span class="kicker">${d.query ? `问答 · 「${esc(d.query)}」` : d.trigger === 'digest' ? '本场原话' : d.readOnly && d.trigger !== 'conflict' ? '往期原话' : d.trigger === 'conflict' ? '冲突原话' : 'Recall'}${item.startedAt ? ' · ' + esc(formatDate(item.startedAt)) + ' 会议' : ` · <span id="card-ago">${ago(S.state.sessionMs - item.endMs)}</span>`}</span>
         <button class="close" data-act="close" aria-label="关闭">✕</button>
       </div>
       ${candidates}
       <div class="quote">“${quote}”</div>
       <div class="meta">${speaker ? `<span>${esc(speaker)}</span>` : ''}<span>${clock(range.startMs)}–${clock(range.endMs)}</span><span class="badge">语音转写</span></div>
       <div class="row">
-        <button class="chip" data-act="play" data-key="${esc(cardClipKey())}">▶ 回听原声</button>
+        <button class="chip" data-act="play" data-key="${esc(cardClipKey())}" ${item.audioAvailable === false || d.readOnly ? 'disabled' : ''}>${item.audioAvailable === false || d.readOnly ? '原声未保留' : '▶ 回听原声'}</button>
         <button class="chip ghost" data-act="prev" ${canPrev ? '' : 'disabled'}>＋前一句</button>
         <button class="chip ghost" data-act="next" ${canNext ? '' : 'disabled'}>＋后一句</button>
         ${c.before || c.after ? '<button class="chip ghost" data-act="reset">还原</button>' : ''}
       </div>
       <div class="actions">
         <button class="btn ghost" data-act="dismiss">丢弃</button>
-        <button class="btn secondary" data-act="save">保存</button>
-        <button class="btn primary" data-act="draft">生成行动 →</button>
+        <button class="btn secondary" data-act="save" ${d.readOnly ? 'disabled' : ''}>保存</button>
+        <button class="btn primary" data-act="draft" ${d.readOnly ? 'disabled' : ''}>生成行动 →</button>
       </div>
-      <p class="footnote">不点保存就不会留下 · 召回 ${(d.latencyMs / 1000).toFixed(1)} 秒 · ${esc(d.engine)}</p>`;
+      <p class="footnote">${d.readOnly ? '往期文字 · 只读' : '本场原话 · 可保存或起草行动'} · 召回 ${(d.latencyMs / 1000).toFixed(1)} 秒 · ${esc(d.engine)}</p>`;
   }
 
   // ---- clips --------------------------------------------------------------------------------
@@ -464,6 +490,7 @@
   function syncPlayButtons() {
     document.querySelectorAll('#sheet [data-key]').forEach((btn) => {
       const playing = S.playingKey === btn.dataset.key;
+      if (btn.disabled) return;
       if (btn.dataset.act === 'play') btn.textContent = playing ? '■ 停止' : '▶ 回听原声';
       else btn.textContent = playing ? '■' : '▶';
     });
@@ -577,6 +604,10 @@
       <label class="field"><span>Mac 收音地址（配合 adb reverse 用 127.0.0.1）</span><input id="set-remote" inputmode="url" placeholder="127.0.0.1:7790" value="${esc(s.remoteAddress || '127.0.0.1:7790')}"></label>
       <p class="fine">测试音频：${esc(s.testWavName || '内置合成对话')} · 需要 PCM 16kHz / 单声道 / 16bit WAV</p>
       <div class="row"><button class="chip" data-act="pick-audio">选择测试 WAV</button><button class="chip ghost" data-act="reset-audio">恢复内置音频</button></div>
+      <label class="switch"><span>说「Oops」触发找回/提问</span><input type="checkbox" id="set-voice" ${s.voiceTrigger !== false ? 'checked' : ''}></label>
+      <label class="switch"><span>提醒短震动</span><input type="checkbox" id="set-vibrate" ${s.noticeVibrate !== false ? 'checked' : ''}></label>
+      <label class="switch"><span>会议文字自动同步</span><input type="checkbox" id="set-sync" ${s.memorySync !== false ? 'checked' : ''}></label>
+      <p class="fine">会把转写文字、标签、说话人和提醒存到团队服务器，不含音频，可在往期会议里删除。</p>
       <label class="switch"><span>使用 Mock 后端</span><input type="checkbox" id="set-mock" ${s.backend === 'mock' ? 'checked' : ''}></label>
       <label class="field"><span>后端地址</span><input id="set-url" inputmode="url" placeholder="http://192.168.1.10:8000" value="${esc(s.backendUrl || '')}"></label>
       <label class="field"><span>服务访问凭据</span><input id="set-token" type="password" autocomplete="off" placeholder="${s.hasBackendToken ? '已配置；留空保留原凭据' : '远程服务提供的访问凭据'}"></label>
@@ -656,6 +687,7 @@
 
   function applySettings() {
     const settings = {
+      voiceTrigger: $('set-voice').checked, noticeVibrate: $('set-vibrate').checked, memorySync: $('set-sync').checked,
       source: $('set-source').value,
       remoteAddress: $('set-remote').value.trim(),
       mockBackend: $('set-mock').checked,
@@ -679,13 +711,83 @@
       : '<p class="fine">还没有保存的片段。召回后点「保存」才会留在这里。</p>';
     return `<div class="grabber"></div>
       <div class="sheet-head"><span class="kicker">已保存 · 长期记忆</span><button class="close" data-act="close" aria-label="关闭">✕</button></div>
-      ${body}`;
+      ${historyTabs()}${body}`;
+  }
+
+  const sheetHead = (title) => `<div class="grabber"></div><div class="sheet-head"><span class="kicker">${esc(title)}</span><button class="close" data-act="close" aria-label="关闭">✕</button></div>`;
+  function askHtml() {
+    return `${sheetHead('问答 · 从原话找答案')}
+      <label class="field"><span>范围</span><select id="ask-scope"><option value="session">本场</option><option value="history">往期会议</option></select></label>
+      <label class="field"><span>想问什么？</span><textarea id="ask-query" maxlength="500" placeholder="预算上限是多少？谁负责新方案？"></textarea></label>
+      <div class="row"><button class="chip ghost" data-act="ask-example" data-query="预算上限是多少？">预算上限</button><button class="chip ghost" data-act="ask-example" data-query="谁负责新方案？">谁来负责</button></div>
+      <button class="btn primary" data-act="ask-submit">查找原话</button><p class="fine">答案只引用已记录的原话。本场停止收音后仍可提问，下一场开始会清空本场索引。</p>`;
+  }
+  function agendaHtml() {
+    const a = S.state.agenda || {};
+    return `${sheetHead('本场目标与议程')}
+      <label class="field"><span>本场目标</span><input id="agenda-goal" maxlength="500" value="${esc(a.goal || '')}" placeholder="确认上线方案与负责人"></label>
+      <label class="field"><span>议程 · 每行一项，可加分钟数</span><textarea id="agenda-items" rows="6" placeholder="方案评审 10&#10;负责人确认（5分钟）">${esc((a.items || []).map(i => i.title + (i.plannedMs ? ` ${i.plannedMs / 60000}` : '')).join('\n'))}</textarea></label>
+      <label class="field"><span>会议计划时长（分钟，可留空）</span><input id="agenda-minutes" type="number" min="1" max="480" value="${a.plannedMs ? a.plannedMs / 60000 : ''}"></label>
+      <p class="fine">最多 20 项，每项标题 60 字，时长 1–480 分钟。收音中也可以修改；已讨论时长会保留。</p>
+      <div class="actions two"><button class="btn ghost" data-act="agenda-clear">清除议程</button><button class="btn primary" data-act="agenda-save">保存议程</button></div>`;
+  }
+  function saveAgenda() {
+    const lines = $('agenda-items').value.split('\n').map(x => x.trim()).filter(Boolean);
+    if (lines.length > 20) return toast('最多 20 项议程', true);
+    const items = lines.map(line => {
+      const m = line.match(/^(.*?)(?:[（(]\s*(\d+)\s*分钟\s*[）)]|\s+(\d+))\s*$/);
+      return { title: m ? m[1].trim() : line, minutes: m ? Number(m[2] || m[3]) : null };
+    });
+    const minutes = $('agenda-minutes').value ? Number($('agenda-minutes').value) : null;
+    if (items.some(i => !i.title || i.title.length > 60) || [...items.map(i => i.minutes), minutes].some(n => n !== null && (!Number.isInteger(n) || n < 1 || n > 480))) return toast('请检查标题和分钟数', true);
+    send('agenda.set', {goal: $('agenda-goal').value.trim(), items, minutes}); closeSheet();
+  }
+  let noticeTimer;
+  function showNotice(n) {
+    S.notices.set(n.id, n);
+    S.activeNotices = [...S.activeNotices.filter(x => x !== n.id), n.id].slice(-2);
+    renderNoticeBanners();
+    clearTimeout(noticeTimer);
+    noticeTimer = setTimeout(() => { S.activeNotices = []; renderNoticeBanners(); }, 12000);
+  }
+  function noticeButtons(n) {
+    return `<div class="row">${n.evidenceIds?.length ? `<button class="chip" data-act="notice-open" data-id="${esc(n.id)}">查看原话</button>` : ''}
+      <button class="chip ghost" data-act="notice-useful" data-id="${esc(n.id)}" ${n.useful === true ? 'disabled' : ''}>有用</button><button class="chip ghost" data-act="notice-wrong" data-id="${esc(n.id)}" ${n.useful === false ? 'disabled' : ''}>不准</button>
+      <button class="chip ghost" data-act="notice-dismiss" data-id="${esc(n.id)}" aria-label="关闭提醒">✕</button></div>`;
+  }
+  function renderNoticeBanners() {
+    $('notices').innerHTML = S.activeNotices.map(id => S.notices.get(id)).filter(n => n && !n.dismissed).map(n =>
+      `<div class="notice-banner"><b>${esc(n.title)}</b><p>${esc(n.detail)}</p>${noticeButtons(n)}</div>`).join('');
+    const count = [...S.notices.values()].filter(n => !n.dismissed).length;
+    $('btn-notices').hidden = !count; $('btn-notices').textContent = `提醒 ${count}`;
+  }
+  function noticeRecordsHtml(rows, readonly = false) {
+    return rows.length ? rows.map(n => `<div class="saved-item"><b>${esc(n.title)}</b><p class="fine">${esc(n.detail)}</p><span class="meta">${clock(n.atMs ?? n.at_ms)}${n.useful === false ? ' · 已反馈不准' : n.useful === true ? ' · 已反馈有用' : ''}${n.dismissed ? ' · 已收起' : ''}</span>${readonly ? '' : noticeButtons(n)}</div>`).join('') : '<p class="fine">暂无提醒</p>';
+  }
+  const historyTabs = () => `<div class="row"><button class="chip ghost" data-act="saved-list">已保存片段</button><button class="chip" data-act="history-list">往期会议</button></div>`;
+  function historyHtml() {
+    return `${sheetHead('往期会议 · 团队文字存档')}${historyTabs()}
+      ${(S.sheet.items || []).map(i => `<button class="cand" data-act="history-open" data-id="${esc(i.session_id)}"><span class="t">${esc(i.goal || '会议')}</span><span class="meta">${esc(formatDate(i.started_at))} · ${i.utterance_count} 句</span></button>`).join('') || '<p class="fine">还没有同步的会议文字。</p>'}
+      <p class="footnote">团队共享，仅文字，不含音频。服务器默认保留 30 天。</p>`;
+  }
+  function historyOpen(p) {
+    S.history = p;
+    S.historySummary = { commitments: p.digest?.commitment || [], decisions: p.digest?.decision || [], constraints: p.digest?.constraint || [], ideas: p.digest?.idea || [], notices: p.notices || [] };
+    openSheet({kind: 'historyDigest'});
+  }
+  function historySearch(p) {
+    if (!p.items?.length) return openSheet({kind: 'notFound', reason: '往期会议原话里没有找到答案'});
+    const items = p.items.map(i => ({id: i.id, text: i.text, startMs: i.start_ms, endMs: i.end_ms, speaker: i.speaker,
+      prob: i.prob, audioAvailable: false, startedAt: i.started_at}));
+    openCard({id: 'history-search', trigger: 'ask', query: p.query, nowMs: 0, items, pool: items, single: items.length === 1,
+      engine: p.engine, latencyMs: 0, readOnly: true});
   }
 
   // ---- errors -------------------------------------------------------------------------------
 
   function onError(p) {
     toast(p.message, true);
+    if (p.scope === 'history' && S.sheet?.kind === 'pending') closeSheet();
     if (p.scope === 'recall') {
       setBusy(false);
       if (S.sheet?.kind === 'pending') closeSheet();
@@ -704,8 +806,23 @@
   // ---- interactions -------------------------------------------------------------------------
 
   const ACTIONS = {
+    'ask-example': el => { $('ask-query').value = el.dataset.query; },
+    'ask-submit': () => { const query = $('ask-query').value.trim(); if (!query) return toast('请输入问题'); const history = $('ask-scope').value === 'history'; openSheet({kind: 'pending'}); send(history ? 'history.search' : 'ask.session', {query}); },
+    'agenda-save': saveAgenda,
+    'agenda-clear': () => {send('agenda.clear'); closeSheet();},
+    'ideas-all': () => {S.showAllIdeas = true; renderSheet();},
+    'history-list': () => {openSheet({kind: 'pending'}); send('history.list');},
+    'saved-list': () => send('saved.list'),
+    'history-open': el => {openSheet({kind: 'pending'}); send('history.open', {sessionId: el.dataset.id});},
+    'history-delete-prompt': () => {S.sheet.deleteConfirm = true; renderSheet();},
+    'history-delete-confirm': () => send('history.delete', {sessionId: S.history.session_id, confirm: true}),
+    'history-quote': el => { const u = S.history.utterances.find(x => x.id === el.dataset.id); if (u) historySearch({query: '', engine: 'archive', items: [{...u, prob: 1, started_at: S.history.started_at}]}); },
+    'notice-open': el => { const n = S.notices.get(el.dataset.id); if (n?.evidenceIds?.length) send('digest.openMany', {ids: n.evidenceIds}); },
+    'notice-useful': el => noticeFeedback(el.dataset.id, true),
+    'notice-wrong': el => noticeFeedback(el.dataset.id, false),
+    'notice-dismiss': el => {send('notice.dismiss', {id: el.dataset.id}); const n = S.notices.get(el.dataset.id); if (n) n.dismissed = true; renderNoticeBanners();},
     close: closeSheet,
-    'commitment-open': (el) => send('commitment.open', { utteranceId: el.dataset.id }),
+    'commitment-open': (el) => send('digest.open', { utteranceId: el.dataset.id }),
     'retry-recall': () => { closeSheet(); send('recall.trigger'); },
     cand: (el) => { S.card.sel = Number(el.dataset.i); S.card.before = 0; S.card.after = 0; renderSheet(); },
     prev: () => { S.card.before += 1; renderSheet(); },
@@ -747,7 +864,15 @@
     'reset-audio': () => send('testAudio.reset'),
   };
 
-  $('sheet').addEventListener('change', (e) => {
+  function noticeFeedback(id, useful) {
+    send('notice.feedback', {id, useful}); const n = S.notices.get(id); if (n) n.useful = useful;
+    renderNoticeBanners(); if (['notices', 'commitments'].includes(S.sheet?.kind)) renderSheet();
+  }
+  $('notices').addEventListener('click', e => {const el = e.target.closest('[data-act]'); if (el && !el.disabled) ACTIONS[el.dataset.act]?.(el);});
+  $('btn-ask').addEventListener('click', () => openSheet({kind: 'ask'}));
+  $('btn-agenda').addEventListener('click', () => openSheet({kind: 'agenda'}));
+  $('btn-notices').addEventListener('click', () => openSheet({kind: 'notices'}));
+  $('sheet').addEventListener('change' , (e) => {
     if (e.target.id === 'vp-name') { S.voiceprintName = e.target.value; renderSheet(); }
   });
 

@@ -16,3 +16,6 @@ python3 scripts/test_voiceprint_split.py
 python3 scripts/test_backend_http.py
 python3 scripts/test_voiceprint_registry.py
 python3 scripts/test_speaker_preview.py
+
+python3 scripts/test_notices_meetings.py
+python3 -m py_compile scripts/meeting_features.py scripts/notice_probe.py

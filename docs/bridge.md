@@ -88,3 +88,29 @@ bridge-mock.js 只有在原生桥不存在时安装模拟桥，使用 dialog.wav
 ## 说话人拆分试验（2026-10-07）
 
 settings.set 增加 `speakerPreview`，默认 false；state 增加 `speakerPreviewEnabled/liveSpeakerStatus/liveSpeakers/liveOverlap`。定稿句及 asr.speaker 增加单独 `speakerPreview:{experimental,startMs,endMs,activities,segments,jevUsed}`，内部字段使用 camelCase。H5 开关显示「实时换人拆分与重叠提示（试验）」；滚动提示身份候选/待确认/疑似多人同时说话，定稿按原文词时间显示试验分段。Jev 辅助姓名标为待核对。刷新及开关切换保留试验数据并重新渲染，不写入正式 segments、Candidate 或行动草稿。
+
+## 2026-10-07：纪要、问答、议程、提醒、往期会议
+
+新增 H5 → 原生：
+
+| type | payload | 行为 |
+|---|---|---|
+| digest.open | {utteranceId} | 打开本场纪要原话；commitment.open 保留为别名 |
+| digest.openMany | {ids:[1–3个原话id]} | 冲突两句并列查看；含历史句时只读 |
+| ask.session | {query:1–500字} | 全场原话问答，与召回共用在途锁 |
+| agenda.set | {goal,items:[{title,minutes?:整数}],minutes?:整数} | 保存下一场议程，收音中更新本场；时长1–480分钟 |
+| agenda.clear | {} | 清除本场及下次议程 |
+| notice.dismiss | {id} | 收起提醒并同步该反馈 |
+| notice.feedback | {id,useful:boolean} | 记录“有用/不准” |
+| history.list | {} | 团队往期会议列表 |
+| history.open | {sessionId} | 读取历史文字与纪要 |
+| history.search | {query} | 搜索往期原话 |
+| history.delete | {sessionId,confirm:true} | H5 二次确认后删除；本场收音中须先停止 |
+
+`settings.set` 新增 voiceTrigger/noticeVibrate/memorySync，三个开关默认开。`state` 新增 digestCounts:{decision,commitment,constraint,idea}、agenda:{goal,items:[{id,title,plannedMs,coveredMs}],plannedMs,currentItemId,revision,tracking}、notices、voiceTrigger、noticeVibrate、memorySync、syncStatus（idle/off/pending/retrying/unsupported/failed/synced）、syncPending。tracking 为 waiting/supported/unsupported。
+
+`session.summary` 保留 commitments，增加 decisions/constraints/ideas/notices；待办每句附 ownerHint（明确点名）、whenRaw、taskStatus、taskUrl。audioExpired 表示未暂存此原话。召回卡片 items 增加 audioAvailable；历史卡片增加 readOnly:true/startedAt，历史上下文按钮、回听、保存、起草均禁用。
+
+原生 → H5 的 `notice` 为 {id,kind,title,detail,atMs,evidenceIds,itemId,history?,dismissed,useful}，横幅位于遮罩上方，最多两条，12 秒后收起到“提醒 N”。history 为历史原话的 snake_case 数据。`history.list/open/delete/search` 事件直接携带对应 API 响应，search 增加 query。snapshot/state/session.summary 均可恢复提醒记录；重新载入页面不会重新震动。
+
+说 Oops 或欧普斯/哦普斯/奥普斯可触发，问句走本场问答，其他走召回；整句“把刚刚那个想法留下来”等指令也触发。开关关闭不触发，5秒内去重；语音口令仅在 ASR 定稿后响应，不是独立低功耗热词模型。

@@ -16,6 +16,7 @@
   try { saved = JSON.parse(localStorage.getItem(key) || '[]'); } catch { saved = []; }
   const state = { capturing: false, sessionId: '', source: 'wav', sessionMs: 0, bufferedMs: 0,
     retentionMs: 300000, asr: 'off', asrDetail: null, level: 0, playing: false,
+    voiceTrigger: true, noticeVibrate: true, memorySync: true, syncStatus: 'synced', syncPending: 0, digestCounts: {}, notices: [], agenda: {goal: '', items: [], tracking: 'waiting'},
     savedCount: saved.length, backend: 'mock', backendUrl: '', speakerInfo: false,
     testWavName: '内置合成对话（浏览器模拟）', asrGaps: [], sourceDetail: null, sourceReady: false, remoteAddress: '127.0.0.1:7790' };
   const bridge = { onmessage: null, postMessage: (raw) => {
@@ -46,11 +47,16 @@
       if (state.sessionMs >= u.endMs + 300 && !transcript.some((x) => x.id === uid)) {
         const final = { ...u, id: uid, speaker: null };
         transcript.push(final); sessionTranscript.push(final); emit('asr.final', final);
-        final.tag = i === 0 ? 'constraint' : i === 3 ? 'commitment' : 'uncertain';
+        final.tag = ['constraint', 'idea', 'decision', 'commitment', 'uncertain'][i];
         final.tagEngine = 'rules-mock';
         emit('asr.tag', { ...final });
         state.commitmentCount = sessionTranscript.filter((u) => u.tag === 'commitment').length;
         state.tagsSupported = true; state.analysisPending = 0; state.analysisFailed = 0;
+        state.digestCounts = Object.fromEntries(['decision', 'commitment', 'constraint', 'idea'].map(t => [t, sessionTranscript.filter(u => u.tag === t).length]));
+        if (i === 2) {
+          const n = {id: id('notice'), kind: 'conflict', title: '可能与之前的约束冲突', detail: `之前：「${sessionTranscript[0].text}」\n本场：「${final.text}」`, atMs: state.sessionMs, evidenceIds: [sessionTranscript[0].id, final.id]};
+          state.notices.push(n); emit('notice', n);
+        }
         emit('session.summary', summary());
       } else if (state.sessionMs >= u.startMs && state.sessionMs < u.endMs) {
         const chars = Math.ceil(u.text.length * (state.sessionMs - u.startMs) / (u.endMs - u.startMs));
@@ -62,18 +68,24 @@
     emit('state', { ...state });
   }
   function summary() {
-    return { sessionId: state.sessionId, commitments: sessionTranscript.filter((u) => u.tag === 'commitment').map((u) => ({ ...u, audioExpired: false })) };
+    return { sessionId: state.sessionId, ...Object.fromEntries([['commitments','commitment'],['decisions','decision'],['constraints','constraint'],['ideas','idea']].map(([key, tag]) => [key, sessionTranscript.filter(u => u.tag === tag).map(u => ({...u, audioExpired: false, whenRaw: tag === 'commitment' ? '周五前' : null}))])), notices: state.notices };
   }
   async function recall(p) {
     emit('recall.pending', { trigger: 'button' }); await sleep(350);
-    const pool = transcript.filter((u) => !/oops|欧普斯|哦普斯|奥普斯|把刚刚那个想法留下来/i.test(u.text));
+    const pool = (p.ask ? sessionTranscript : transcript).filter((u) => !/oops|欧普斯|哦普斯|奥普斯|把刚刚那个想法留下来/i.test(u.text));
     if (!pool.length) return emit('recall.notFound', { reason: '最近 5 分钟内还没有可召回的原话' });
     const ideas = pool.filter((u) => /想法|觉得|方案|周五/.test(u.text));
-    const ranked = (ideas.length ? ideas : pool).slice().sort((a,b) => (/觉得/.test(b.text) ? 1 : 0) - (/觉得/.test(a.text) ? 1 : 0));
+    let ranked = (ideas.length ? ideas : pool).slice().sort((a,b) => (/觉得/.test(b.text) ? 1 : 0) - (/觉得/.test(a.text) ? 1 : 0));
+    if (p.ask && p.query) {
+      const grams = s => new Set(s.replace(/[^\p{L}\p{N}]/gu, '').split('').slice(0,-1).map((c,i) => c+s.replace(/[^\p{L}\p{N}]/gu, '')[i+1]));
+      const q = grams(p.query); const score = u => [...q].filter(x => grams(u.text).has(x)).length;
+      ranked = pool.slice().sort((a,b) => score(b)-score(a));
+      if (!score(ranked[0])) return emit('recall.notFound', {reason:'本场原话里没有找到答案'});
+    }
     recallCount++;
     const single = recallCount % 2 === 1 || ranked.length < 2;
     const items = ranked.slice(0, single ? 1 : 2).map((u,i) => ({ ...u, prob: single ? 0.82 : i ? 0.4 : 0.48 }));
-    const card = { id: id('c'), trigger: 'button', query: p.query || null, nowMs: state.sessionMs,
+    const card = { id: id('c'), trigger: p.ask ? 'ask' : 'button', query: p.query || null, nowMs: state.sessionMs,
       single, engine: 'browser-mock', windowMs: 120000, latencyMs: 350, items, pool };
     cards.set(card.id, card);emit('recall.card', card);emit('latency', { recentMs: [350], medianMs: 350 });
   }
@@ -102,18 +114,39 @@
       message: '浏览器模拟：没有实际写入飞书', readBackConfirmed: true, mock: true, polling: false };
     actions.set(opId, r);emit('action.result', r);
   }
+  let mockMeetings = [{session_id: 'demo', started_at: '2026-10-06T09:00:00+08:00', goal: '上线方案评审（模拟）', utterance_count: 1}];
+  const historicalRows = [{id: 'u1', text: '预算不能超过10万。', start_ms: 0, end_ms: 4482, tag: 'constraint', speaker: null}];
   function handle(type, p) {
     switch (type) {
       case 'hello': queueMicrotask(() => emit('snapshot', { state, transcript, summary: summary(), team, insets: { top: 0, bottom: 0 } }));break;
       case 'capture.start':
         if (state.capturing) break;
         stopClip();transcript = [];sessionTranscript = [];cards.clear();state.sessionId = id('session');
+        state.notices = []; state.digestCounts = {};
         Object.assign(state, { capturing: true, sourceReady: true, sessionMs: 0, bufferedMs: 0, asr: 'simulated', commitmentCount: 0, analysisPending: 0, analysisFailed: 0, tagsSupported: null });
         startedAt = performance.now();emit('state', { ...state });clearInterval(timer);timer = setInterval(tick, 100);break;
       case 'capture.stop': state.capturing = false;state.sourceReady = false;state.asr = 'off';state.level = 0;clearInterval(timer);stopClip();emit('state', { ...state });break;
+      case 'ask.session': void recall({...p, ask: true}); break;
+      case 'agenda.set':
+        state.agenda = {goal: p.goal, items: p.items.map((i,n) => ({id: 'a'+(n+1), title: i.title, plannedMs: i.minutes ? i.minutes * 60000 : null, coveredMs: 0})), plannedMs: p.minutes ? p.minutes * 60000 : null, tracking: 'supported'}; emit('state', {...state}); break;
+      case 'agenda.clear': state.agenda = {goal: '', items: [], tracking: 'waiting'}; emit('state', {...state}); break;
+      case 'notice.dismiss': {const n = state.notices.find(x => x.id === p.id); if (n) n.dismissed = true; emit('state', {...state}); emit('session.summary', summary()); break;}
+      case 'notice.feedback': {const n = state.notices.find(x => x.id === p.id); if (n) n.useful = p.useful; emit('state', {...state}); emit('session.summary', summary()); break;}
+      case 'digest.openMany': {
+        const rows = sessionTranscript.filter(u => p.ids.includes(u.id));
+        const card = {id: id('c'), trigger: 'conflict', single: rows.length === 1, engine: 'browser-mock', latencyMs: 0, items: rows.map(u => ({...u, prob: 1})), pool: rows}; cards.set(card.id, card); emit('recall.card', card); break;
+      }
+      case 'history.list': emit('history.list', {count: mockMeetings.length, items: mockMeetings}); break;
+      case 'history.open': {
+        const meeting = mockMeetings.find(i => i.session_id === p.sessionId); if (!meeting) return emit('error', {scope: 'history', message: '会议已删除'});
+        emit('history.open', {...meeting, utterances: historicalRows, digest: {constraint: historicalRows, commitment: [], decision: [], idea: []}, notices: []}); break;
+      }
+      case 'history.delete': if (p.confirm) {mockMeetings = mockMeetings.filter(i => i.session_id !== p.sessionId); emit('history.delete', {deleted: true});} break;
+      case 'history.search': emit('history.search', {query: p.query, engine: 'browser-mock', items: mockMeetings.length ? historicalRows.map(u => ({...u, id: 'h:demo:'+u.id, session_id: 'demo', started_at: '2026-10-06T09:00:00+08:00', prob: .9})) : []}); break;
       case 'recall.trigger': void recall(p);break;
+      case 'digest.open':
       case 'commitment.open': {
-        const u = sessionTranscript.find((u) => u.id === p.utteranceId && u.tag === 'commitment');
+        const u = sessionTranscript.find((u) => u.id === p.utteranceId);
         if (!u) break;
         const at = sessionTranscript.indexOf(u);
         const card = { id: id('c'), trigger: 'commitment', query: null, nowMs: state.sessionMs,
@@ -153,6 +186,7 @@
       case 'settings.set':
         state.source = p.source || state.source;state.backendUrl = p.backendBaseUrl || '';state.speakerInfo = !!p.speakerInfo;
         state.remoteAddress = p.remoteAddress || state.remoteAddress;
+        ['voiceTrigger','noticeVibrate','memorySync'].forEach(k => { if (k in p) state[k] = p[k]; });
         emit('state', { ...state });emit('toast', { message: '浏览器只模拟后端；真实配置请在 Android App 中设置' });break;
       case 'testAudio.pick': emit('toast', { message: '外部 WAV 导入请在 Android App 中使用' });break;
       case 'testAudio.reset': state.testWavName = '内置合成对话（浏览器模拟）';emit('state', { ...state });break;

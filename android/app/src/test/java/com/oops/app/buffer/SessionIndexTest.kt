@@ -4,6 +4,18 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class SessionIndexTest {
+    @Test fun digestTagMovesAndDecisionAudioSurvivesRing() {
+        val index = SessionIndex(); index.reset("s")
+        index.add("s", Utterance("u1", 0, 1000, "决定上线", null))
+        index.setTag("s", "u1", "decision", .9, "jev")
+        assertTrue(index.retainAudio("s", "u1", 0, ByteArray(32000)))
+        assertEquals(listOf("u1"), index.summary().grouped["decision"]!!.map { it.id })
+        index.setTag("s", "u1", "constraint", .9, "jev")
+        assertTrue(index.summary().grouped["decision"]!!.isEmpty())
+        assertTrue(index.hasAudio("u1"))
+        index.setTag("s", "u1", "idea", .9, "jev")
+        assertFalse(index.hasAudio("u1")); assertTrue(index.summary().grouped["constraint"]!!.isEmpty())
+    }
     @Test fun chronologicalIndexHandlesLateResultsUpdatesAndEviction() {
         val index = SessionIndex(maxUtterances = 4)
         index.reset("s")

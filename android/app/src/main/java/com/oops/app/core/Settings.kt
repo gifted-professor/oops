@@ -9,6 +9,19 @@ import com.oops.app.asr.VolcCredentials
 class Settings(context: Context) {
     private val prefs = context.getSharedPreferences("oops_settings", Context.MODE_PRIVATE)
 
+    var voiceTrigger: Boolean
+        get() = prefs.getBoolean("voice_trigger", true)
+        set(value) = prefs.edit { putBoolean("voice_trigger", value) }
+    var noticeVibrate: Boolean
+        get() = prefs.getBoolean("notice_vibrate", true)
+        set(value) = prefs.edit { putBoolean("notice_vibrate", value) }
+    var memorySync: Boolean
+        get() = prefs.getBoolean("memory_sync", true)
+        set(value) = prefs.edit { putBoolean("memory_sync", value) }
+    var agendaJson: String
+        get() = prefs.getString("agenda_json", "{}").orEmpty()
+        set(value) = prefs.edit { putString("agenda_json", value) }
+
     var mockBackend: Boolean
         get() = prefs.getBoolean(KEY_MOCK, BuildConfig.BACKEND_BASE_URL.isBlank())
         set(value) = prefs.edit { putBoolean(KEY_MOCK, value) }

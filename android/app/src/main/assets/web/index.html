@@ -13,6 +13,7 @@
       <span class="logo">Oops</span>
       <span class="tagline">Never miss what mattered.</span>
     </div>
+    <button class="icon-btn" id="btn-ask" aria-label="问答">问</button>
     <button class="icon-btn" id="btn-settings" aria-label="调试设置">⚙︎</button>
   </header>
 
@@ -28,16 +29,18 @@
     </div>
     <div class="gap-banner" id="gap-banner" hidden></div>
     <div class="speaker-preview-status" id="speaker-preview-status" hidden></div>
-    <button class="chip" id="btn-commitments" hidden></button>
+    <button class="chip" id="btn-agenda">＋本场目标与议程</button>
+    <span class="fine" id="agenda-note"></span><div class="fine" id="sync-note"></div>
+    <button class="chip" id="btn-commitments" hidden></button><button class="chip ghost" id="btn-notices" hidden></button>
   </section>
 
   <main class="transcript" id="transcript">
-    <p class="section-title">最近 5 分钟 · 本场承诺保留至下一次收音</p>
+    <p class="section-title">最近 5 分钟 · 本场纪要保留至下一次收音</p>
     <div class="empty" id="empty">
       开始收音后，最近 5 分钟的对话会出现在这里。<br>
       重要的话不用提前标记，事后点 <b>Oops</b> 就能找回原话。
     </div>
-    <div class="pruned-note" id="pruned-note" hidden>更早的字幕已移出列表，本场承诺仍可查看</div>
+    <div class="pruned-note" id="pruned-note" hidden>更早的字幕已移出列表，本场纪要仍可查看</div>
     <ol id="lines"></ol>
     <div class="partial" id="partial"></div>
   </main>
@@ -50,6 +53,7 @@
 
   <div class="backdrop" id="backdrop" hidden></div>
   <section class="sheet" id="sheet" hidden aria-live="polite"></section>
+  <div id="notices" aria-live="polite"></div>
   <div class="toast" id="toast" hidden></div>
 
   <script src="bridge-mock.js"></script>

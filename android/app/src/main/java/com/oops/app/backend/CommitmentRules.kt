@@ -13,6 +13,9 @@ object CommitmentRules {
     private val aliases = mapOf("玉麟" to "洪玉麟", "春源" to "林春源", "古月" to "江古月", "丽萍" to "黄丽萍", "Lydia" to "黄丽萍")
     private val constraint = Regex("(预算|成本|费用)[^，。,.]{0,12}|(不能超过|不超过|控制在)[^，。,.]{0,10}")
 
+    private val whenPattern = Regex("下?周[一二三四五六日天](之?前)?|明天|后天|今天|月底|\\d{1,2}月\\d{1,2}[日号](之?前)?|\\d{1,2}[日号](之?前)?")
+    fun deadline(text: String): String? = whenPattern.find(text)?.value
+
     fun evidence(text: String, team: List<String>): Evidence {
         if (excluded.containsMatchIn(deadlineBefore.replace(text) { it.groupValues[1] + "前" })) return Evidence("unknown")
         val names = (team.associateWith { it } + aliases.filterValues { it in team })

@@ -7,6 +7,12 @@ import com.oops.app.buffer.SpeakerSegment
 /** App ↔ backend contract; the wire format is documented in docs/api.md. */
 interface OopsApi {
     val name: String
+    suspend fun notice(request: org.json.JSONObject): org.json.JSONObject? = null
+    suspend fun syncMeeting(request: org.json.JSONObject): org.json.JSONObject? = null
+    suspend fun historyList(): org.json.JSONObject? = null
+    suspend fun historyOpen(id: String): org.json.JSONObject? = null
+    suspend fun historyDelete(id: String): org.json.JSONObject? = null
+    suspend fun historySearch(query: String): org.json.JSONObject? = null
 
     /** Evidence selection: the backend may only pick candidate ids (Jev, LLM fallback). */
     suspend fun recall(request: RecallRequest): RecallResponse

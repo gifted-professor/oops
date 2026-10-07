@@ -257,3 +257,15 @@ button:disabled { opacity: 0.45; cursor: default; }
     --line: #2c2840;
     --shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
 }
+
+#notices { position: fixed; z-index: 30; top: calc(var(--safe-top) + 64px); left: 12px; right: 12px; pointer-events: none; }
+.notice-banner { background: var(--card); border: 1px solid var(--brand); border-radius: 16px; box-shadow: var(--shadow); padding: 12px; margin-bottom: 8px; pointer-events: auto; }
+.notice-banner p { font-size: 13px; margin: 4px 0 8px; white-space: pre-line; }
+.notice-banner .row { gap: 5px; }
+.notice-banner .chip { font-size: 12px; padding: 5px 9px; }
+#btn-agenda { display: block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 8px; }
+#sync-note { font-size: 11px; margin: 4px 0; }
+.cand .meta { white-space: normal; }
+.sheet[data-kind="commitments"] .cand,
+.sheet[data-kind="historyDigest"] .cand,
+.sheet[data-kind="history"] .cand { grid-template-columns: minmax(0, 1fr); gap: 4px; }

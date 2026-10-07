@@ -42,6 +42,9 @@ object BridgeJson {
         .put("sourceReady", s.sourceReady)
         .put("remoteAddress", s.remoteAddress)
         .put("asrGaps", JSONArray(s.asrGaps.map { JSONObject().put("fromMs", it.fromMs).put("toMs", it.toMs) }))
+        .put("digestCounts", JSONObject(s.digestCounts)).put("agenda", s.agenda).put("notices", JSONArray(s.notices))
+        .put("voiceTrigger", s.voiceTrigger).put("noticeVibrate", s.noticeVibrate).put("memorySync", s.memorySync)
+        .put("syncStatus", s.syncStatus).put("syncPending", s.syncPending)
         .put("commitmentCount", s.commitmentCount).put("analysisPending", s.analysisPending)
         .put("analysisFailed", s.analysisFailed).put("tagsSupported", s.tagsSupported ?: NULL)
         .put("sessionTruncated", s.sessionTruncated)
@@ -63,8 +66,15 @@ object BridgeJson {
             .put("speaker", it.speaker ?: NULL).put("score", it.score).put("source", it.source ?: NULL).put("approx", it.approx)
     })
 
-    fun summary(s: OopsEvent.SessionSummary): JSONObject = JSONObject().put("sessionId", s.sessionId)
-        .put("commitments", JSONArray(s.commitments.map { utterance(it).put("audioExpired", it.id !in s.audioIds) }))
+    fun summary(s: OopsEvent.SessionSummary): JSONObject {
+        fun rows(items: List<Utterance>) = JSONArray(items.map { u -> utterance(u)
+            .put("audioExpired", u.id !in s.audioIds).also { row ->
+                s.hints[u.id]?.let { hints -> hints.keys().forEach { row.put(it, hints.get(it)) } }
+            } })
+        return JSONObject().put("sessionId", s.sessionId).put("commitments", rows(s.commitments))
+            .put("decisions", rows(s.grouped["decision"].orEmpty())).put("constraints", rows(s.grouped["constraint"].orEmpty()))
+            .put("ideas", rows(s.grouped["idea"].orEmpty())).put("notices", JSONArray(s.notices))
+    }
 
     fun card(c: RecallCard): JSONObject = JSONObject()
         .put("id", c.id)
@@ -80,7 +90,7 @@ object BridgeJson {
             JSONArray(
                 c.items.map {
                     JSONObject().put("id", it.utteranceId).put("startMs", it.startMs).put("endMs", it.endMs)
-                        .put("text", it.text).put("speaker", it.speaker ?: NULL).put("prob", it.prob)
+                        .put("text", it.text).put("speaker", it.speaker ?: NULL).put("prob", it.prob).put("audioAvailable", it.audioAvailable)
                 },
             ),
         )
@@ -118,6 +128,7 @@ object BridgeJson {
     fun saved(items: List<JSONObject>): JSONObject = JSONObject().put("items", JSONArray(items))
 
     fun event(e: OopsEvent): Pair<String, JSONObject> = when (e) {
+        is OopsEvent.Json -> e.type to e.payload
         is OopsEvent.Partial ->
             "asr.partial" to JSONObject().put("text", e.text).put("startMs", e.startMs).put("endMs", e.endMs)
         is OopsEvent.Final -> "asr.final" to utterance(e.utterance)

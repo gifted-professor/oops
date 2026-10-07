@@ -2,7 +2,7 @@ package com.oops.app.buffer
 
 import java.util.TreeMap
 
-/** Memory-only session evidence. Text outlives the ring; only commitment PCM is copied. */
+/** Memory-only session evidence. Text outlives the ring; selected digest PCM is copied. */
 class SessionIndex(
     private val maxUtterances: Int = 20_000,
     private val maxClips: Int = 50,
@@ -12,10 +12,16 @@ class SessionIndex(
     data class Audio(val startMs: Long, val pcm: ByteArray) {
         val endMs: Long get() = startMs + pcm.size / 32L // 16 kHz mono s16le
     }
-    data class Summary(val sessionId: String, val commitments: List<Utterance>, val audioIds: Set<String>)
+    data class Summary(val sessionId: String, val grouped: Map<String, List<Utterance>>, val audioIds: Set<String>) {
+        val commitments get() = grouped["commitment"].orEmpty()
+    }
+    companion object {
+        val DIGEST_TAGS = setOf("commitment", "decision", "constraint", "idea")
+        val RETAINED_TAGS = setOf("commitment", "decision", "constraint")
+    }
     private val items = LinkedHashMap<String, Utterance>()
     private val timeline = TreeMap<Long, LinkedHashSet<String>>()
-    private val commitmentTimeline = TreeMap<Long, LinkedHashSet<String>>()
+    private val digestTimeline = DIGEST_TAGS.associateWith { TreeMap<Long, LinkedHashSet<String>>() }
     private val clips = LinkedHashMap<String, Audio>()
     private val pending = mutableSetOf<String>()
     private var bytes = 0
@@ -30,7 +36,7 @@ class SessionIndex(
     @Synchronized fun reset(session: String) {
         sessionId = session
         items.clear(); clips.clear(); pending.clear(); counted.clear()
-        timeline.clear(); commitmentTimeline.clear()
+        timeline.clear(); digestTimeline.values.forEach { it.clear() }
         bytes = 0; discoveredCommitments = 0; truncated = false
     }
 
@@ -39,15 +45,15 @@ class SessionIndex(
         if (items.size >= maxUtterances && u.id !in items) {
             // Do not claim an evicted text entry is still available for opening.
             val oldest = items.keys.first()
-            items.remove(oldest)?.let { removeTime(timeline, it); removeTime(commitmentTimeline, it) }
+            items.remove(oldest)?.let { removeTime(timeline, it); digestTimeline.values.forEach { index -> removeTime(index, it) } }
             pending.remove(oldest); counted.remove(oldest)
             clips.remove(oldest)?.let { bytes -= it.pcm.size }
             truncated = true
         }
-        items[u.id]?.let { removeTime(timeline, it); removeTime(commitmentTimeline, it) }
+        items[u.id]?.let { removeTime(timeline, it); digestTimeline.values.forEach { index -> removeTime(index, it) } }
         items[u.id] = u
         timeline.getOrPut(u.startMs) { linkedSetOf() }.add(u.id)
-        if (u.tag == "commitment") commitmentTimeline.getOrPut(u.startMs) { linkedSetOf() }.add(u.id)
+        digestTimeline[u.tag]?.getOrPut(u.startMs) { linkedSetOf() }?.add(u.id)
         return true
     }
 
@@ -58,10 +64,9 @@ class SessionIndex(
 
     private fun ordered(index: TreeMap<Long, LinkedHashSet<String>>) = index.values.flatMap { ids -> ids.mapNotNull(items::get) }
     @Synchronized fun snapshot(): List<Utterance> = ordered(timeline)
-    @Synchronized fun commitments(): List<Utterance> = ordered(commitmentTimeline)
+    @Synchronized fun commitments(): List<Utterance> = ordered(digestTimeline.getValue("commitment"))
     @Synchronized fun summary(): Summary {
-        val commitments = commitments()
-        return Summary(sessionId, commitments, commitments.filter { it.id in clips }.map { it.id }.toSet())
+        return Summary(sessionId, digestTimeline.mapValues { ordered(it.value) }, clips.keys.toSet())
     }
     /** O(log n + count) previous context, excluding entries at the same timestamp. */
     @Synchronized fun preceding(id: String, count: Int = 4): List<Utterance> {
@@ -81,8 +86,9 @@ class SessionIndex(
         if (session != sessionId || tag !in ValueTags.ALL) return null
         val u = items[id] ?: return null
         if (tag == "commitment" && counted.add(id)) discoveredCommitments++
-        if (tag == "commitment") commitmentTimeline.getOrPut(u.startMs) { linkedSetOf() }.add(id)
-        else removeTime(commitmentTimeline, u)
+        digestTimeline.values.forEach { removeTime(it, u) }
+        digestTimeline[tag]?.getOrPut(u.startMs) { linkedSetOf() }?.add(id)
+        if (tag !in RETAINED_TAGS) clips.remove(id)?.let { bytes -= it.pcm.size }
         return u.copy(tag = tag, tagProb = prob, tagEngine = engine).also { items[id] = it }
     }
 
@@ -103,7 +109,7 @@ class SessionIndex(
     }
 
     @Synchronized fun retainAudio(session: String, id: String, startMs: Long, pcm: ByteArray): Boolean {
-        if (session != sessionId || items[id]?.tag != "commitment" || pcm.isEmpty() || pcm.size > maxAudioBytes) return false
+        if (session != sessionId || items[id]?.tag !in RETAINED_TAGS || pcm.isEmpty() || pcm.size > maxAudioBytes) return false
         clips.remove(id)?.let { bytes -= it.pcm.size }
         while (clips.isNotEmpty() && (clips.size >= maxClips || bytes + pcm.size > maxAudioBytes)) {
             bytes -= clips.remove(clips.keys.first())!!.pcm.size

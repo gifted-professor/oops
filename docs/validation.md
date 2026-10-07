@@ -231,3 +231,21 @@ Redmi 原生集成测试实录手机麦克风 10 秒并经 HTTPS 调用在线 te
 ### 后续：香港及手机试验已开启
 
 上述部署阻碍已解除：用户提供 SSH 登录信息后，香港 preview 模型和 API 已部署开启，手机开关已打开并直接使用香港后端；本场转写和 Mac 收音持续保留。无需测试 APK 即已从当前手机实际看到实时姓名预览、定稿试验分段、Jev 辅助提示及疑似重叠提示；截图 .local-backend/diagnostics/speaker-preview-enabled-phone.png，手机滚动日志 speaker-preview-phone-live.log，服务器对应日志 speaker-preview-cloud-phone.log，公网工程音频报告 speaker-preview-cloud-smoke.json。这里验证的是功能和数据流；此前测试 APK 自动安装受限的记录仍属实，未宣称完成该项自动测试，也未把现场显示当作准确率真值。
+
+## 2026-10-07：剩余 P0 ①–⑥ 本地补齐
+
+基线本地提交 `e7405fd` 保存原有香港部署、声纹录入和讲话人试验改动；提交前及本轮收尾扫描均未发现硬编码密钥，配置、录音、APK、临时证据继续在 Git 忽略范围内。本轮新增四类纪要、待办缺负责人/截止提示、任务关联、本场原话问答、ASR Oops 口令、议程时间提醒、可选 topic/resolution/conflict、短震动、团队文字同步与往期原话查询。没有修改正式句内拆分或 self 自动填负责人闸门。
+
+已验证：
+
+- `./scripts/check.sh lintDebug`：Android 构建、assembleDebug、lintDebug 与 JVM 单测；新增纪要索引迁移/决定原声暂存、120句问答候选与口令解析、议程解析/上限、时间提醒只触发一次、累计到点、连续跑题与5分钟去重、覆盖时长和切换结论检查、停止缺项汇总、无效topic/prob拒绝、同步分批/upsert/在途更新/退避/404停用/会话隔离，以及Mock金额规则/无匹配问答。最终93项Android单测，0失败/错误/跳过；assembleDebug与lintDebug通过。
+- 后端原有 self_test 加入 FakeJev 判断/阈值和规则保守性；`scripts/test_notices_meetings.py` 的4个测试涵盖 HTTP 401/403、同步幂等、标签更新、额外PCM/preview字段排除、列表/打开/搜索/删除、迟到同步不重建、30天清理、0700/0600权限、并发upsert、task会话关联、模型映射与无效输入。现有声纹、HTTP鉴权、Node音频测试也通过。
+- `.venv-voice/bin/python scripts/local_backend.py --port 8807 --feishu dry-run --state-dir <scratch>`：以独立临时目录运行，curl 跑通 healthz、sync/upsert、topic、resolution、conflict、list、open、search、ended_at最终同步、delete。先验证无Jev规则降级，再启用真实Jev完成相同流程。请求只含合成文字；没有创建真实飞书任务或接入手机。日志在 gitignored `evidence/p0-1007/http-smoke.log` 和 `http-jev-smoke.log`。
+- `scripts/notice_probe.py`：5个合成中文样例，包括在题、跑题、有结论/无结论、u3与u1预算冲突，实际模型 `jev-1.13.0`。5个均选中预期结果；概率分别1.0/1.0/1.0/1.0/0.95，耗时736/619/672/642/687ms。记录在 `evidence/notice-probe.json`。少量样例和很高概率不构成准确率/概率校准结论。
+- Codex 浏览器 375×812，light/dark：设置议程两种分钟写法、开始收音、纪要计数、待办负责人待定、模拟冲突记录/不准反馈/两句对照、本场问答预算原话、往期列表/纪要/问答/只读按钮。控制台 error/warn 为空。截图发现纪要列表误用两列网格，已改为完整宽度并重载检查明暗纪要；横幅在遮罩上方，12秒收起。原8765端口已有进程且返回空响应，未终止它；按相同 H5 启动参数改用8766验证。
+
+截图保存于 `evidence/p0-1007/`：`light-digest.jpg`、`dark-digest.jpg`、`light-conflict-banner.jpg`、`dark-ask.jpg`、`dark-history.jpg`、`dark-history-ask.jpg`。全为浏览器模拟数据。
+
+未验证：未安装新 APK、未重启或部署香港服务；尚未确认四位成员的文字上传同意。未验收真人语音唤醒、长会话后台同步稳定性、实际会议跑题/遗漏/冲突误报率、HyperOS熄屏时震动。语音唤醒依赖ASR定稿，不是独立热词模型。同步队列在内存，进程结束会丢失尚未成功发送的更新。多人识别仍需独立人工标注。
+
+下一批仍是⑦个人记忆/个性化、⑧飞书日程、⑨录音豆自动会议起止。待确认的安装、部署、回退和现场检查见 [P0 上线交接](p0-rollout.md)。

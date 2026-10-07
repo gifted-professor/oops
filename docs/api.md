@@ -41,7 +41,7 @@ Android 设置按规范化 base URL 保存访问凭据；恢复旧操作时使�
 {"picks":[],"engine":"jev-1.13.0"}
 ```
 
-`trigger` 当前为 button / notification / double_tap，后续增加 voice。`query` 可以为 null。
+`trigger` 为 button / notification / double_tap / voice / ask。`query` 可以为 null；ask 要求非空问题。
 App 先请求最近 2 分钟；有效候选最高概率不足 0.3 时扩到 5 分钟。低于 0.1 不展示，前两项差距至少 0.2 显示单卡，否则最多显示 3 条。不存在的编号、重复编号、非法概率和原声已覆盖的候选会先过滤，再判断是否扩窗。
 
 Jev 适配建议（已核对 [官方 Choice 文档](https://docs.typesafe.ai/primitives/choice) 与 [HTTP API](https://docs.typesafe.ai/api)）：把候选编号作为 Choice 选项，**另外提供 `no_match` 选项**，避免所有内容都无关时仍强制挑一句。`no_match` 占优则返回空 picks；其余选项直接使用 Jev `probabilities` 对应值，不要把剔除 no_match 后的概率重新归一化，也不要把整体 confidence 当作某句的概率。Choice 最多 255 选项，因此单次候选最多 254 条；更多时先分组缩小。中文对话和阈值要用真人样本验证。固定模型版本并记录真实返回版本。
@@ -222,3 +222,39 @@ App 可选接口重试策略：IO、429、5xx 最多重试 2 次，间隔 1、3 
 pyannote 3.0 局部编号不作为身份，不跨不连续发言共用声纹判断；连续单人活动按至多 3.2 秒独立比对，短于 1.6 秒保持未知。10 秒窗口每 5 秒移动，边缘裁剪后查询注册声纹。试验有漏报和误报；重叠活动只能视为疑似提示。
 
 `/v1/speaker` 请求带 `preview:true` 时也可附带相同结构的 `preview` 字段。原 `speaker/segments/segments_validated` 及负责人验收闸门继续独立工作。App 将 preview 保存在单独展示字段；Candidate、召回证据、负责人解析与飞书任务不接收此字段。App 默认关闭开关，每次至多一个滚动请求，约两秒请求一次，过期、换音源或换会话结果丢弃。
+
+## 2026-10-07：本场问答、提醒和会议文字（本地待部署）
+
+`recall.trigger` 新增 `ask/voice`。问答从全场索引预选最多 120 句，排除口令与过短句，优先标签、字面重合与时间；Jev 只选择最能回答问题的原话，提供 `no_match`。问答校验原话编号与概率，不因原声已过期而丢弃文字。原声状态由 App 提供。规则问答无字面匹配时返回空 picks。
+
+### POST /v1/notices
+
+可选接口：404/501 后 App 停用此场的判断请求，仅保留规则时间提醒。全部文字明确作为数据处理；App 丢弃跨会话或旧议程 revision 的 topic/resolution 结果。
+
+| kind | 请求字段（另含 session_id） | 响应 |
+|---|---|---|
+| topic | agenda: {goal,items:[{id,title,planned_ms?}],planned_ms?}, utterances: 定稿句，最多 40 句/4000 字 | {topic: 议程 id 或 on_topic/off_topic/unclear,prob,probabilities?,engine} |
+| resolution | item:{id,title}, utterances: 最多 60 句 | {resolved:true/false/null,prob,engine} |
+| conflict | utterance: 当前句, previous: 本场先前决定/约束，最多 30 句 | {conflict,with: 原话或 null,prob,engine} |
+
+只有目标没有议程时 topic 可返回 `on_topic`；有议程时必须返回所发送的 id 或 `off_topic/unclear`。prob 必须为 0–1 有限数或规则的 null。跑题 ≥0.6 连续两次才提醒，5 分钟去重。缺结论 ≥0.6 才提醒，规则 resolution 返回 null，规则 topic 只做标题字面重合，从不判跑题。
+
+冲突 Jev 选项为 p0..pn/none，≥0.6 且非 none 才提示“可能冲突”。规则仅比较明确金额上限与超限金额；提问、假设和新上限不触发。服务器补入最近 10 场的决定/约束，按字面重合取前 10 条。历史 with 增加 `id:"h:<session>:<uid>"/session_id/started_at`；本场文字仍从本地发送的原话取，历史原话来自受鉴权服务器。
+
+### 会议文字接口
+
+全部要求 App 全权限凭据，声纹邀请凭据返回 403；没有有效凭据返回 401。公网部署仍需设置 `OOPS_API_TOKEN`。文件存于 `<state-dir>/meetings/<session_id>.json`，目录 0700、文件 0600，带锁、原子写入。默认保留 30 天，`OOPS_MEETING_RETENTION_DAYS` 可调整；读取/同步时清理过期文字。删除的编号保留无文字标记，阻止延迟请求重建该场。
+
+| 接口 | 请求/响应 |
+|---|---|
+| POST /v1/meetings/sync | {session_id,started_at,time_zone,ended_at?,agenda?,utterances:[最多500句],notices:[最多100条]} → {session_id,utterance_count,notice_count} |
+| GET /v1/meetings?limit=30 | limit 1–100 → {count,items:[session_id,started_at,ended_at,goal,utterance_count,digest_counts]} |
+| GET /v1/meetings/{id} | 元数据、按时间排列的 utterances、notices、digest 四类原话、按 operations.request.session_id 关联的 tasks |
+| POST /v1/meetings/search | {query:1–500字} → {items:[id,text,start_ms,end_ms,speaker,tag,session_id,started_at,prob],engine} |
+| POST /v1/meetings/delete | {session_id,confirm:true} → {deleted:true}；重复删除幂等，迟到同步返回 400 |
+
+句子/提醒按 id upsert；会议上限 20,000 句及 2,000 条提醒。同步字段采用白名单，仅文字、正式标签、说话人、提醒和议程；不保存音频、词时间戳、试验 preview 或额外上传字段。每句最多 2,000 字，编号 `[A-Za-z0-9_-]{1,100}`，开始日期必须含时区且创建后不可更改。历史待办另有 owner_hint/when_raw/task_status/task_url；self 仍不自动填负责人。搜索预选最多 120 句交给 Jev，失败时仅按字面重合找原话。历史打开与搜索在 App 中只读，不回听、不创建任务。
+
+App 每场队列绑定开始时的后端；20 秒或累积 30 句发送，同一队列单请求，停止时标记 ended_at 并最终发送。失败指数退避，404/501 停用，不合法数据等永久错误停止队列。队列在内存中，进程被系统结束时尚未成功同步的文字可能丢失；已同步内容仍在服务器。`memorySync` 默认开，可关闭自动发送。部署/安装前须按本轮计划确认四位成员同意文字上传。
+
+`healthz` 新增 `notices:true/meetings:true`，只表示接口存在，不表示 Jev 中文判断已验收。

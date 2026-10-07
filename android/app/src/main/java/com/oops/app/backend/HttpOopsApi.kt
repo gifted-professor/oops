@@ -24,6 +24,24 @@ class HttpOopsApi(private val http: OkHttpClient, baseUrl: String, private val t
         return builder
     }
 
+    override suspend fun notice(request: JSONObject): JSONObject? =
+        optional("/v1/notices", request)?.let { NoticeJson.validate(it, request) }
+    override suspend fun syncMeeting(request: JSONObject) = optional("/v1/meetings/sync", request)
+    override suspend fun historyList() = optionalGet("/v1/meetings?limit=30")
+    override suspend fun historyOpen(id: String): JSONObject? {
+        require(id.matches(Regex("[A-Za-z0-9_-]{1,100}")))
+        return optionalGet("/v1/meetings/$id")
+    }
+    override suspend fun historyDelete(id: String) = optional("/v1/meetings/delete", JSONObject().put("session_id", id).put("confirm", true))
+    override suspend fun historySearch(query: String) = optional("/v1/meetings/search", JSONObject().put("query", query))
+    private suspend fun optionalGet(path: String): JSONObject? = withContext(Dispatchers.IO) {
+        http.newCall(request(path).get().build()).execute().use { response ->
+            if (response.code == 404 || response.code == 501) null
+            else if (!response.isSuccessful) throw HttpFailure(response.code, "会议接口返回 HTTP ${response.code}")
+            else JSONObject(response.body.string())
+        }
+    }
+
     override suspend fun recall(request: RecallRequest) =
         ApiJson.recallResponse(post("/v1/recall", ApiJson.recallRequest(request)))
 

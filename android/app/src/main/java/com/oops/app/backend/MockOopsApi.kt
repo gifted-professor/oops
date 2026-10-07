@@ -23,12 +23,33 @@ class MockOopsApi(
     override suspend fun recall(request: RecallRequest): RecallResponse {
         delay(latencyMs)
         if (request.candidates.isEmpty()) return RecallResponse(emptyList(), name)
+        if (request.trigger in setOf("ask", "voice") && !request.query.isNullOrBlank()) {
+            return RecallResponse(request.candidates.map { Pick(it.id, com.oops.app.recall.overlap(request.query, it.text)) }
+                .filter { it.prob >= .15 }.sortedByDescending { it.prob }.take(3), name)
+        }
         val scored = request.candidates.map { it.id to score(it, request) }
         val best = scored.maxOf { it.second }
         val weights = scored.map { (id, s) -> id to exp((s - best) / TEMPERATURE) }
         val total = weights.sumOf { it.second }
         val picks = weights.map { (id, w) -> Pick(id, w / total) }.sortedByDescending { it.prob }.take(5)
         return RecallResponse(picks, name)
+    }
+
+    override suspend fun notice(request: org.json.JSONObject): org.json.JSONObject {
+        delay(latencyMs)
+        val result = org.json.JSONObject().put("engine", "rules-mock").put("prob", org.json.JSONObject.NULL)
+        when (request.getString("kind")) {
+            "topic" -> result.put("topic", "unclear")
+            "resolution" -> result.put("resolved", org.json.JSONObject.NULL)
+            "conflict" -> {
+                val current = request.getJSONObject("utterance").getString("text")
+                val previous = request.getJSONArray("previous")
+                val matched = (0 until previous.length()).map(previous::getJSONObject).firstOrNull {
+                    ConflictRules.amountConflict(current, it.getString("text")) }
+                result.put("conflict", matched != null).put("with", matched ?: org.json.JSONObject.NULL)
+            }
+        }
+        return result
     }
 
     override suspend fun tagUtterance(request: TagRequest): TagResult {
@@ -51,7 +72,7 @@ class MockOopsApi(
     override suspend fun draftAction(request: DraftRequest): DraftResponse {
         delay(latencyMs)
         val main = request.utterances.joinToString("") { it.text }
-        val whenRaw = WHEN.find(main)?.value
+        val whenRaw = CommitmentRules.deadline(main)
         val constraint = (request.utterances + request.context)
             .firstNotNullOfOrNull { CONSTRAINT.find(it.text)?.value }
         // No self auto-owner until independent split/owner validation has passed.
@@ -88,28 +109,11 @@ class MockOopsApi(
         private const val TEMPERATURE = 0.6
         private val IDEA = Regex("想法|觉得|建议|应该|不如|要不|我认为|可以先|方案")
         private val COMMITMENT = Regex("下?周[一二三四五六日天]|明天|后天|今天|月底|我来|发你|给你|负责")
-        private val WHEN = Regex(
-            "下?周[一二三四五六日天](之?前)?|明天|后天|今天|月底|" +
-                "\\d{1,2}月\\d{1,2}[日号](之?前)?|\\d{1,2}[日号](之?前)?",
-        )
         private val CONSTRAINT = Regex("(预算|成本|费用)[^，。,.]{0,12}|(不能超过|不超过|控制在)[^，。,.]{0,10}")
         private val WEEKDAY = Regex("(下)?周([一二三四五六日天])")
         private val MONTH_DAY = Regex("(\\d{1,2})月(\\d{1,2})[日号]")
         private val DAY_OF_MONTH = Regex("(\\d{1,2})[日号]")
-        private val FILLER = setOf("刚刚", "刚才", "那个", "这个", "留下", "下来", "一下")
-
-        /** Share of the query's character bigrams that also appear in [text]. */
-        fun overlap(query: String, text: String): Double {
-            val q = bigrams(query) - FILLER
-            if (q.isEmpty()) return 0.0
-            val t = bigrams(text)
-            return q.count { it in t }.toDouble() / q.size
-        }
-
-        private fun bigrams(s: String): Set<String> {
-            val clean = s.lowercase().filter { it.isLetterOrDigit() }
-            return (0 until clean.length - 1).map { clean.substring(it, it + 2) }.toSet()
-        }
+        fun overlap(query: String, text: String) = com.oops.app.recall.overlap(query, text)
 
         /** "周五前" / "下周一" / "明天" / "10月9日" … → a calendar date on or after [today]. */
         fun resolveDate(raw: String, today: LocalDate): LocalDate? {
