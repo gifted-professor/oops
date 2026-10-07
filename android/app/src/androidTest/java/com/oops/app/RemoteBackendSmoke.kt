@@ -9,6 +9,11 @@ import com.oops.app.backend.*
 import com.oops.app.core.Settings
 import com.oops.app.store.ActionOperationStore
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.async
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.flow.first
+import com.oops.app.engine.OopsEvent
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
@@ -16,7 +21,7 @@ import java.io.File
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 
-/** Device integration check. Writes only with an explicit `-e confirm true`; one durable test operation. */
+/** Device integration checks. Feishu writes require `confirm`; meetingFeatures uploads disposable synthetic text. */
 class RemoteBackendSmoke : Instrumentation() {
     private var arguments = Bundle()
     private var replaySettingsBefore: List<String>? = null
@@ -33,6 +38,10 @@ class RemoteBackendSmoke : Instrumentation() {
 
     override fun onStart() {
         val report = Bundle()
+        if (arguments.getString("meetingFeatures") == "true") {
+            checkMeetingFeatures(report)
+            return
+        }
         if (arguments.getString("speakerPreviewSmoke") == "true") {
             checkSpeakerPreview(report)
             return
@@ -111,6 +120,90 @@ class RemoteBackendSmoke : Instrumentation() {
             report.putString("error", e.message ?: e.javaClass.simpleName)
             finish(Activity.RESULT_CANCELED, report)
         }
+    }
+    /** Synthetic real-ASR -> tags -> queue -> deployed history, without Feishu writes. */
+    private fun checkMeetingFeatures(report: Bundle) {
+        val settings = Settings(targetContext)
+        val original = targetContext.getSharedPreferences("oops_settings", 0).all
+        var session = ""
+        try {
+            startActivitySync(Intent(targetContext, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            runOnMainSync {
+                OopsEngine.applySettings(JSONObject().put("voiceTrigger", false).put("memorySync", true))
+                OopsEngine.setAgenda(JSONObject().put("goal", "[Oops P0合成验收] 产品方案与预算")
+                    .put("minutes", 1).put("items", org.json.JSONArray().put(JSONObject().put("title", "产品方案"))))
+            }
+            startActivitySync(Intent(targetContext, MainActivity::class.java)
+                .setAction(MainActivity.ACTION_DEBUG_START).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                .putExtra("builtin", true).putExtra("source", "wav"))
+            awaitState(50_000) { OopsEngine.transcriptSnapshot().any { u -> u.text.contains("预算不能超过") } }
+            session = OopsEngine.state.value.sessionId
+            awaitState(25_000) { it.analysisPending == 0 && it.digestCounts.values.sum() >= 2 }
+            val finals = OopsEngine.transcriptSnapshot()
+            report.putInt("asr_final_count", finals.size)
+            report.putString("digest_counts", OopsEngine.state.value.digestCounts.toString())
+            runOnMainSync { OopsEngine.stopCapture() }
+            Thread.sleep(6500) // ASR flush and final metadata before checking durable storage.
+            awaitState(25_000) { it.syncStatus == "synced" && it.syncPending == 0 }
+            runBlocking {
+                val http = OkHttpClient.Builder().callTimeout(15, TimeUnit.SECONDS).build()
+                val api = HttpOopsApi(http, settings.backendBaseUrl, settings.backendToken)
+                val saved = requireNotNull(api.historyOpen(session))
+                val rows = saved.getJSONArray("utterances")
+                check(rows.length() >= finals.size)
+                val stored = (0 until rows.length()).map { rows.getJSONObject(it) }.associateBy { it.getString("id") }
+                finals.forEach { u ->
+                    check(stored.getValue(u.id).getString("text") == u.text) { "ASR text changed in storage" }
+                }
+                check(!saved.isNull("ended_at"))
+                check(saved.getJSONObject("agenda").getString("goal").startsWith("[Oops P0合成验收]"))
+                check(requireNotNull(api.historySearch("预算不能超过多少")).getJSONArray("items").length() > 0)
+                val answer = async(start = CoroutineStart.UNDISPATCHED) {
+                    withTimeout(15_000) { OopsEngine.events.first { it is OopsEvent.RecallReady && it.card.trigger == "ask" } }
+                }
+                runOnMainSync { OopsEngine.askSession("预算不能超过多少") }
+                val card = (answer.await() as OopsEvent.RecallReady).card
+                check(card.items.any { it.text.contains("预算不能超过") })
+                report.putBoolean("ask_original_evidence", true)
+                report.putBoolean("text_sync_exact", true)
+                report.putInt("stored_utterance_count", rows.length())
+                val budget = Candidate("probe-budget", 0, 1000, null, "预算不能超过10万。", "constraint")
+                val notice = requireNotNull(api.notice(JSONObject().put("kind", "conflict").put("session_id", session)
+                    .put("utterance", ApiJson.candidate(Candidate("probe-proposal", 2000, 3000, null, "方案预算要13万。", "decision")))
+                    .put("previous", org.json.JSONArray().put(ApiJson.candidate(budget)))))
+                check(notice.getBoolean("conflict") && notice.getJSONObject("with").getString("id") == budget.id)
+                report.putBoolean("live_conflict", true)
+                runOnMainSync { OopsEngine.history("delete", session, true) }
+                awaitState(15_000) { runBlocking {
+                    try { api.historyOpen(session); false } catch (e: HttpFailure) { e.status == 404 }
+                } }
+                report.putBoolean("synthetic_meeting_deleted", true)
+            }
+            report.putString("session_id", session)
+            report.putBoolean("passed", true)
+        } catch (e: Exception) {
+            report.putBoolean("passed", false)
+            report.putString("error", e.message ?: e.javaClass.simpleName)
+            if (session.isNotBlank()) {
+                runOnMainSync { OopsEngine.stopCapture() }
+                Thread.sleep(6500)
+                runOnMainSync { OopsEngine.history("delete", session, true) }
+                Thread.sleep(1500)
+            }
+        } finally {
+            runOnMainSync { OopsEngine.stopCapture() }
+            // Restore the exact preference snapshot, including key absence and endpoint credentials.
+            val edit = targetContext.getSharedPreferences("oops_settings", 0).edit().clear()
+            original.forEach { (key, value) -> when(value) {
+                is String -> edit.putString(key, value)
+                is Boolean -> edit.putBoolean(key, value)
+                is Int -> edit.putInt(key, value)
+                is Long -> edit.putLong(key, value)
+                is Float -> edit.putFloat(key, value)
+            } }
+            check(edit.commit())
+        }
+        finish(if (report.getBoolean("passed")) Activity.RESULT_OK else Activity.RESULT_CANCELED, report)
     }
     /** Read-only live preview and actual ASR finals; never enrolls or creates tasks. */
     private fun checkSpeakerPreview(report: Bundle) {
