@@ -64,3 +64,10 @@
 - 主APK未更换；本轮测试包安装再次被手机取消，因此没有把公网服务合成检查写成测试APK已在香港运行。手机私有设置与上线前快照逐项完全一致，Mac Wireless microphone桥与7790映射保留。
 
 当前外部阻碍仅剩豆包ASR资源授权：HTTP403 `volc.seedasr.sauc.duration requested resource not granted`。这个资源名为官方2.0小时版（[官方模型列表](https://docs.volcengine.com/docs/DoubaoVoice/model-list?lang=en)）；需在对应火山账号核对已授权模型和当前应用/API凭据绑定，不能从服务商服务器登录推断语音授权已恢复。真人口令、误报率、熄屏震动和长会议稳定性仍未验收。同步队列仍不抗进程退出。
+
+
+## 2026-10-07：用户充值后重新验收
+
+测试APK这次安装成功，手机直接对香港新版后端运行 `meetingFeatures`。ASR连接仍返回HTTP403 `volc.seedasr.sauc.duration requested resource not granted`，未收到语音定稿，后续全流程未通过；不能把用户已充值视为资源权限已恢复。报告 `evidence/p0-1007/recharged-full-pipeline.log`。独立合成场次仅产生空白元数据，已按合成议程/开始日期/无文字无提醒核对后删除；原设置完全一致，测试APK卸载并恢复Mac remote收音。
+
+进一步核对发现：已安装主APK与本机APK的SHA256均为 `50cd0671916a5aeb92c074beb456553586b897f8746ac5283acc6763b4098f89`，其构建配置及DEX中AppID为 `2983469702`，使用AppID+AccessToken鉴权，资源为 `volc.seedasr.sauc.duration`；此前浏览器指向另一AppID `8238142535`。证据 `recharged-client-config.json`。两个应用是否属于同一账号、充值和资源授权是否覆盖手机凭据，尚无控制台证据。登录入口现指向手机实际应用 `2983469702`；内置浏览器仍是登录页，需用户完成登录后继续核对。未更换凭据、资源ID或主APK。
