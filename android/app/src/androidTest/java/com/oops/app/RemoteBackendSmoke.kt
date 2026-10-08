@@ -206,11 +206,11 @@ class RemoteBackendSmoke : Instrumentation() {
                 OopsEngine.selectTestWav("", "内置合成对话")
                 OopsEngine.startCapture("wav")
             }
+            session = OopsEngine.state.value.sessionId
             awaitState(50_000) {
                 check(it.asr != "error") { "ASR unavailable: ${it.asrDetail}" }
                 OopsEngine.transcriptSnapshot().any { u -> u.text.contains("预算不能超过") }
             }
-            session = OopsEngine.state.value.sessionId
             awaitState(25_000) { it.analysisPending == 0 && it.digestCounts.values.sum() >= 2 }
             val finals = OopsEngine.transcriptSnapshot()
             report.putInt("asr_final_count", finals.size)
@@ -248,7 +248,10 @@ class RemoteBackendSmoke : Instrumentation() {
                 report.putBoolean("live_conflict", true)
                 runOnMainSync { OopsEngine.history("delete", session, true) }
                 awaitState(15_000) { runBlocking {
-                    try { api.historyOpen(session); false } catch (e: HttpFailure) { e.status == 404 }
+                    // Optional GET maps 404 to null, rather than throwing HttpFailure.
+                    api.historyOpen(session) == null && requireNotNull(api.historyList()).getJSONArray("items").let { list ->
+                        (0 until list.length()).none { list.getJSONObject(it).getString("session_id") == session }
+                    }
                 } }
                 report.putBoolean("synthetic_meeting_deleted", true)
             }

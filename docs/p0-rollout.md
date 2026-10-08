@@ -63,7 +63,7 @@
 - 重新开始手机remote场次后，自动队列已在香港存下当前会议元数据：Java格式开始日期 `2026-10-08T03:31:47.256060Z`，文件0600、oops所有，无音频/preview字段；手机待同步0。证据 `hk-phone-auto-sync.json`、`hk-phone-final.png`。停止手机场次后，结束日期也由手机自动同步成功（`hk-phone-ended-sync.json`）；该空白验收场次随后删除并恢复remote收音。这证明手机自动同步元数据和结束路径，因ASR403而没有真实转写文字，不能替代真人语音全流程验收。
 - 主APK未更换；本轮测试包安装再次被手机取消，因此没有把公网服务合成检查写成测试APK已在香港运行。手机私有设置与上线前快照逐项完全一致，Mac Wireless microphone桥与7790映射保留。
 
-当前外部阻碍仅剩豆包ASR资源授权：HTTP403 `volc.seedasr.sauc.duration requested resource not granted`。这个资源名为官方2.0小时版（[官方模型列表](https://docs.volcengine.com/docs/DoubaoVoice/model-list?lang=en)）；需在对应火山账号核对已授权模型和当前应用/API凭据绑定，不能从服务商服务器登录推断语音授权已恢复。真人口令、误报率、熄屏震动和长会议稳定性仍未验收。同步队列仍不抗进程退出。
+截至此次部署完成时，外部阻碍为豆包ASR资源授权：HTTP403 `volc.seedasr.sauc.duration requested resource not granted`。这个资源名为官方2.0小时版（[官方模型列表](https://docs.volcengine.com/docs/DoubaoVoice/model-list?lang=en)）；需在对应火山账号核对已授权模型和当前应用/API凭据绑定，不能从服务商服务器登录推断语音授权已恢复。真人口令、误报率、熄屏震动和长会议稳定性仍未验收。同步队列仍不抗进程退出。
 
 
 ## 2026-10-07：用户充值后重新验收
@@ -71,3 +71,16 @@
 测试APK这次安装成功，手机直接对香港新版后端运行 `meetingFeatures`。ASR连接仍返回HTTP403 `volc.seedasr.sauc.duration requested resource not granted`，未收到语音定稿，后续全流程未通过；不能把用户已充值视为资源权限已恢复。报告 `evidence/p0-1007/recharged-full-pipeline.log`。独立合成场次仅产生空白元数据，已按合成议程/开始日期/无文字无提醒核对后删除；原设置完全一致，测试APK卸载并恢复Mac remote收音。
 
 进一步核对发现：已安装主APK与本机APK的SHA256均为 `50cd0671916a5aeb92c074beb456553586b897f8746ac5283acc6763b4098f89`，其构建配置及DEX中AppID为 `2983469702`，使用AppID+AccessToken鉴权，资源为 `volc.seedasr.sauc.duration`；此前浏览器指向另一AppID `8238142535`。证据 `recharged-client-config.json`。两个应用是否属于同一账号、充值和资源授权是否覆盖手机凭据，尚无控制台证据。登录入口现指向手机实际应用 `2983469702`；内置浏览器仍是登录页，需用户完成登录后继续核对。未更换凭据、资源ID或主APK。
+
+
+## 2026-10-07：改用Chrome后，ASR与香港真机闭环通过
+
+用户要求控制普通浏览器后，接入已登录Chrome。实时控制台确认：`2983469702`（shandianshuo）和 `8238142535`（shibie）均在同一火山账号下；手机应用的2.0小时版为正式服务，页面操作为“暂停”，不是“开通”，原30小时包已使用30/30。费用中心可用余额8.97元、欠费0元、1.03元账单已还款；用户充值已到账。因此不能继续将AppID不同描述成充值覆盖错误。截图 `chrome-recharged-balance.png` / `chrome-asr-service.png`，无明文凭据。只读检查，没有购买、改授权、暂停服务或更换凭据。
+
+- `meetingFeatures` 首次充值到账后的真机运行已完成实际ASR定稿、Jev纪要、自动同步、精确原文回读、预算原话问答和冲突判断。最后测试误报删除超时：`HttpOopsApi.historyOpen`将404映射为null，测试却等HttpFailure404。独立公网GET确认该会议已经404。该问题只在测试断言，主App无需更新。首次报告 `chrome-paid-full-pipeline.log`。
+- 修正删除验收：要求historyOpen=null且列表无该session；同时提前记录测试session，确保ASR失败也能清理。`assembleDebugAndroidTest`成功。
+- 再次真机到香港的 `meetingFeatures` **passed=true**：3句实际ASR定稿，3句服务器存档，原文完全一致，停止时间及合成议程存在，原话问答和实际Jev冲突判断通过，测试会议已删除。报告 `chrome-full-pipeline-final.log`，测试专属手机日志 `chrome-full-pipeline-final-phone.log`。
+- 独立 `meetingHttp` **passed=true**：正式手机HttpOopsApi/MeetingSync对实际香港服务完成四类合成标签、原文/防重、往期列表/搜索/问答、主题判断、历史冲突、停止时间、删除和删除后迟到同步400。报告 `chrome-hk-native-http.log`。四标签是构造的合成输入验证，不是四类别自动分类准确率测量。
+- 独立读回确认三个测试session均404，healthz各项正常，所有私有设置与此次开始快照逐项一致。报告 `chrome-final-verification.json`。测试APK卸载，恢复Mac Wireless microphone远端收音和7790映射；新remote场次日志实际ASR connected，截图 `chrome-phone-restored.png` 显示实时识别中、缓存增长、待同步0，音频桥TCP连接established。主APK SHA256仍 `50cd0671916a5aeb92c074beb456553586b897f8746ac5283acc6763b4098f89`；未创建飞书任务。
+
+当前ASR403阻碍已解除；无法仅凭时间关联断定火山后台恢复机制，未改客户端凭据/模型或服务器授权。①–⑥已安装上线并通过合成音频真机业务闭环，现可继续真人试用。真实口令、跑题/遗漏/冲突误报率、自动标签准确率、HyperOS熄屏震动和长会议稳定性仍尚未验收；讲话人预览仍不进入正式拆分/self闸门。
