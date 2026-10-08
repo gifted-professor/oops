@@ -37,3 +37,17 @@
 - `deploy/p0-upgrade.py` 为已授权部署准备了源码/环境备份、基线 SHA 校验、替换两模块、服务重启、401/403及合成业务检查、失败回退。打包路径 `.local-backend/diagnostics/p0-release-1007.tar.gz`，不含凭据、声纹或音频。部署业务检查已在本机 dry-run 服务配合真实 Jev 跑通，包含六接口401/403、同步/upsert/列表/原文/搜索/三类判断/跨场预算冲突/召回/标签/草稿/删除/删除后迟到同步拒绝；日志 `evidence/p0-1007/deploy-route-check.log`。实际香港服务备份、重启和回退尚未执行。部署包 SHA-256 `a5938f68339174b2fea8f1cab53c35463725763aee69b66588d4bdab6647734e`。
 
 待提供 SSH 登录凭据或受保护凭据路径后继续部署；无需再次确认已批准的范围。部署后重新开始手机场次，解除旧场次已缓存的 unsupported 状态，再联调自动文字同步。真人误报、麦克风唤醒、回听对齐、熄屏震动和长会议稳定性仍需现场验收。
+
+
+## 2026-10-07 用户要求重试后的结果
+
+此次测试包已成功安装。以下结果替代上面的「测试包尚不能安装」阻碍，但香港上线仍未执行。
+
+- 原 Redmi `W4W8Q8LVBQ8XZHLF` 的 `remoteSmoke` 实际运行通过：手机直连香港，行动草稿负责人林春源，回读原有测试任务 GUID 成功；未使用 confirm 参数，未创建任务。报告 `evidence/p0-1007/retry-phone-cloud-baseline.log`。
+- 新增 `meetingHttp` 真机检查实际运行通过。手机使用正式 `HttpOopsApi` / `MeetingSync` / `NoticeJson`，连接本机新版后端 dry-run 配合真实 Jev，完成四类合成纪要、精确原文、重复同步防重、往期列表/搜索、本场原话问答、主题判断、跨场历史冲突、停止时间、删除及删除后迟到同步拒绝。合成会议已删除，服务器列表 count=0。报告 `retry-phone-meeting-http.log`，后端日志 `retry-local-backend.log`；这是本地新版后端的手机 HTTP/JSON 验收，不能写成香港已上线或真人语音验收。
+- `meetingFeatures` 全 ASR 流程实际失败，报告 `retry-phone-full-pipeline.log`：豆包 WebSocket 返回 HTTP403，`resource_id=volc.seedasr.sauc.duration`，`requested resource not granted`。当前安装 APK 与原构建 SHA 一致 `50cd0671916a5aeb92c074beb456553586b897f8746ac5283acc6763b4098f89`；没有更换密钥、资源编号或主 App。需核对上游资源授权，不能推断为缓存/网络问题或宣称识别正常。
+- 试验入口改为直接启动 Engine 的 WAV 管线，避免 HyperOS 拒绝后台 startActivitySync 后一直等待；ASR明确失败时快速退出，全部私有设置在 finally 恢复。测试 APK重新构建通过。
+- 测试后逐项解析设置与本轮开始快照一致；测试包卸载，本机业务后端停止，临时8808反向映射撤除。重试开始时 Mac 音频桥和7790映射均未运行，已恢复 Wireless microphone 音频桥、7790反向映射和手机 remote 收音。现能接收PCM、缓存增长，但 ASR 仍显示403，不能称为实时识别恢复。截图 `retry-phone-restored.png`。
+- 香港 SSH 重新尝试仍返回 `Permission denied (password)`；公网 healthz仍只有旧功能，尚未出现 notices/meetings。部署仍等待有效 root SSH 密码或受保护凭据路径，备份/重启/回退尚未执行。
+
+现阶段剩余外部阻碍：香港登录凭据、豆包流式语音资源授权。用户已批准的部署范围仍有效；这两项解除后继续上线和全流程验收，不重复征求范围确认。

@@ -254,3 +254,8 @@ Redmi 原生集成测试实录手机麦克风 10 秒并经 HTTPS 调用在线 te
 ## 2026-10-07 ①–⑥安装与上线进度
 
 用户确认四人文字存档与安装/上线。新版主 APK 已安装，设置恢复逐项一致，Mac Wireless microphone 收音、真实 ASR连接和预览恢复；安装结束了原场次。香港仍运行旧版本，现有凭据 healthz 正常；SSH仅允许密码，部署等待登录凭据。测试包两次被HyperOS拒绝，新增meetingFeatures集成验收仅构建通过，未运行成功。记录和后续步骤见 [p0-rollout.md](p0-rollout.md)。没有新飞书任务、声纹或云端会议写入。
+
+
+### 同日重试：测试包已允许，ASR上游授权失败
+
+测试APK安装成功；`remoteSmoke`手机到香港草稿与既有任务回读通过，没有确认/创建任务。`meetingHttp`手机到本机新版后端的四标签/原文同步/防重/搜索/问答/判断/历史冲突/删除通过，使用真实Jev与dry-run飞书，全部合成会议已删除。完整ASR管线实际尝试失败：HTTP403，`volc.seedasr.sauc.duration requested resource not granted`。安装包SHA未变，设置已逐项恢复，测试APK和临时8808转发已清理；Mac音频桥与7790恢复，但ASR仍报错。香港SSH仍拒绝密码之外登录，部署待凭据。当前结果及证据路径见 [p0-rollout.md](p0-rollout.md) 最新记录。

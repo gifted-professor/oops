@@ -38,6 +38,10 @@ class RemoteBackendSmoke : Instrumentation() {
 
     override fun onStart() {
         val report = Bundle()
+        if (arguments.getString("meetingHttp") == "true") {
+            checkMeetingHttp(report)
+            return
+        }
         if (arguments.getString("meetingFeatures") == "true") {
             checkMeetingFeatures(report)
             return
@@ -121,22 +125,91 @@ class RemoteBackendSmoke : Instrumentation() {
             finish(Activity.RESULT_CANCELED, report)
         }
     }
+    /** Exercises native optional API/JSON parsing on the phone without microphone/ASR/Feishu writes. */
+    private fun checkMeetingHttp(report: Bundle) {
+        val settings = Settings(targetContext)
+        val base = arguments.getString("backend") ?: settings.backendBaseUrl
+        val api = HttpOopsApi(OkHttpClient.Builder().callTimeout(15, TimeUnit.SECONDS).build(),
+            base, settings.backendTokenFor(base))
+        val session = "p0-phone-" + UUID.randomUUID().toString()
+        try {
+            runBlocking {
+                val rows = listOf(
+                    Candidate("u1", 0, 1000, null, "预算不能超过10万。", "constraint"),
+                    Candidate("u2", 2000, 3000, null, "我们决定采用8万的方案。", "decision"),
+                    Candidate("u3", 4000, 5000, null, "林春源周五前提交方案。", "commitment"),
+                    Candidate("u4", 6000, 7000, null, "可以考虑先做一个演示版。", "idea"))
+                val agenda = JSONObject().put("goal", "[Oops P0合成验收] 预算和方案")
+                    .put("planned_ms", 60_000).put("items", org.json.JSONArray().put(JSONObject().put("id", "a1").put("title", "预算")))
+                val sync = MeetingSync(session, java.time.Instant.now().toString(), "Asia/Shanghai")
+                sync.agenda(agenda)
+                rows.forEach(sync::upsert)
+                val batch = requireNotNull(sync.batch(0, true))
+                check(requireNotNull(api.syncMeeting(batch.body)).getInt("utterance_count") == 4)
+                check(requireNotNull(api.syncMeeting(batch.body)).getInt("utterance_count") == 4)
+                sync.complete(batch, 0, true)
+                val saved = requireNotNull(api.historyOpen(session))
+                val stored = saved.getJSONArray("utterances")
+                check(stored.length() == 4)
+                val byId = (0 until stored.length()).map { stored.getJSONObject(it) }.associateBy { it.getString("id") }
+                rows.forEach { row -> check(byId.getValue(row.id).getString("text") == row.text) }
+                val digest = saved.getJSONObject("digest")
+                listOf("constraint", "decision", "commitment", "idea").forEach { check(digest.getJSONArray(it).length() == 1) }
+                check(requireNotNull(api.historyList()).getJSONArray("items").let { list ->
+                    (0 until list.length()).any { list.getJSONObject(it).getString("session_id") == session } })
+                check(requireNotNull(api.historySearch("预算上限是多少")).getJSONArray("items").length() > 0)
+                val picks = api.recall(RecallRequest(session, "ask", "预算上限是多少", 8000, rows)).picks
+                check(picks.any { it.id == "u1" && it.prob >= .65 })
+                val topic = requireNotNull(api.notice(JSONObject().put("kind", "topic").put("session_id", session)
+                    .put("agenda", agenda).put("utterances", org.json.JSONArray().put(ApiJson.candidate(rows[0])))))
+                check(topic.getString("topic") == "a1")
+                val conflict = requireNotNull(api.notice(JSONObject().put("kind", "conflict").put("session_id", session + "-other")
+                    .put("utterance", ApiJson.candidate(Candidate("p", 8000, 9000, null, "方案预算要13万。", "decision")))
+                    .put("previous", org.json.JSONArray())))
+                check(conflict.getBoolean("conflict") && conflict.getJSONObject("with").getString("id").startsWith("h:"))
+                sync.stop(java.time.Instant.now().toString())
+                val end = requireNotNull(sync.batch(20_000, true))
+                requireNotNull(api.syncMeeting(end.body))
+                check(!requireNotNull(api.historyOpen(session)).isNull("ended_at"))
+                check(requireNotNull(api.historyDelete(session)).getBoolean("deleted"))
+                try { api.syncMeeting(end.body); error("Deleted meeting resurrected") }
+                catch (e: HttpFailure) { check(e.status == 400) }
+                report.putBoolean("passed", true)
+                report.putBoolean("four_digest_tags", true)
+                report.putBoolean("exact_text_and_idempotence", true)
+                report.putBoolean("history_search_and_conflict", true)
+                report.putBoolean("delete_tombstone", true)
+                report.putString("backend", base)
+                report.putString("session_id", session)
+            }
+        } catch (e: Exception) {
+            report.putBoolean("passed", false)
+            report.putString("error", e.message ?: e.javaClass.simpleName)
+        } finally {
+            runBlocking { runCatching { api.historyDelete(session) } }
+        }
+        finish(if (report.getBoolean("passed")) Activity.RESULT_OK else Activity.RESULT_CANCELED, report)
+    }
+
     /** Synthetic real-ASR -> tags -> queue -> deployed history, without Feishu writes. */
     private fun checkMeetingFeatures(report: Bundle) {
         val settings = Settings(targetContext)
         val original = targetContext.getSharedPreferences("oops_settings", 0).all
         var session = ""
         try {
-            startActivitySync(Intent(targetContext, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
             runOnMainSync {
                 OopsEngine.applySettings(JSONObject().put("voiceTrigger", false).put("memorySync", true))
                 OopsEngine.setAgenda(JSONObject().put("goal", "[Oops P0合成验收] 产品方案与预算")
                     .put("minutes", 1).put("items", org.json.JSONArray().put(JSONObject().put("title", "产品方案"))))
             }
-            startActivitySync(Intent(targetContext, MainActivity::class.java)
-                .setAction(MainActivity.ACTION_DEBUG_START).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                .putExtra("builtin", true).putExtra("source", "wav"))
-            awaitState(50_000) { OopsEngine.transcriptSnapshot().any { u -> u.text.contains("预算不能超过") } }
+            runOnMainSync {
+                OopsEngine.selectTestWav("", "内置合成对话")
+                OopsEngine.startCapture("wav")
+            }
+            awaitState(50_000) {
+                check(it.asr != "error") { "ASR unavailable: ${it.asrDetail}" }
+                OopsEngine.transcriptSnapshot().any { u -> u.text.contains("预算不能超过") }
+            }
             session = OopsEngine.state.value.sessionId
             awaitState(25_000) { it.analysisPending == 0 && it.digestCounts.values.sum() >= 2 }
             val finals = OopsEngine.transcriptSnapshot()
