@@ -22,10 +22,11 @@ class MeetingSync(val sessionId: String, private val startedAt: String, private 
     var unsupported = false
         private set
     @Synchronized fun upsert(candidate: Candidate) {
-        // Explicit allowlist: never serialize PCM, words, preview or experimental fields.
+        // Explicit allowlist: production attribution only, never PCM, words or preview.
         val j = JSONObject().put("id", candidate.id).put("text", candidate.text)
             .put("start_ms", candidate.startMs).put("end_ms", candidate.endMs)
             .put("speaker", candidate.speaker ?: JSONObject.NULL).put("tag", candidate.tag ?: JSONObject.NULL)
+            .put("segments", JSONArray(candidate.segments.map(ApiJson::segment)))
         utterances[candidate.id] = j.toString()
     }
     @Synchronized fun notice(j: JSONObject) { notices[j.getString("id")] = j.toString() }

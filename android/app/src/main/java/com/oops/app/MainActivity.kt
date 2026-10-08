@@ -214,6 +214,7 @@ class MainActivity : ComponentActivity() {
                 "recall.dismiss" -> OopsEngine.dismissRecall(p.optString("cardId"))
                 "saved.list" -> bridge.send("saved.items", BridgeJson.saved(OopsEngine.savedItems()))
                 "action.draft" -> OopsEngine.draftAction(p.getString("cardId"), p.getJSONArray("utteranceIds").strings())
+                "action.ownerFeedback" -> OopsEngine.recordOwnerFeedback(p)
                 "action.confirm" -> OopsEngine.confirmAction(
                     draftId = p.getString("draftId"),
                     who = p.optString("who"),
@@ -221,6 +222,7 @@ class MainActivity : ComponentActivity() {
                     whenIso = p.optString("whenIso").ifBlank { null },
                     whenRaw = p.optString("whenRaw").ifBlank { null },
                     constraint = p.optString("constraint").ifBlank { null },
+                    ownerSelectionSource = p.optString("ownerSelectionSource", "user"),
                 )
                 "action.status" -> OopsEngine.queryAction(p.getString("draftId"))
                 "testAudio.pick" -> audioPicker.launch(arrayOf("audio/wav", "audio/x-wav", "audio/*"))

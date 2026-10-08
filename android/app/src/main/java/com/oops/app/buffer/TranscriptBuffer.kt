@@ -5,9 +5,13 @@ data class WordTime(val text: String, val startMs: Long, val endMs: Long) {
     fun shift(ms: Long) = copy(startMs = startMs + ms, endMs = endMs + ms)
 }
 
+data class SpeakerCandidate(val name: String, val score: Double)
+
 data class SpeakerSegment(
     val startMs: Long, val endMs: Long, val text: String, val speaker: String?,
     val score: Double, val source: String?, val approx: Boolean = false,
+    val confidence: Double? = null, val tier: String = "C", val overlap: Boolean = false,
+    val candidates: List<SpeakerCandidate> = emptyList(),
 )
 
 object ValueTags {
@@ -29,6 +33,10 @@ data class Utterance(
     val speakerState: String? = null,
     val speakerScore: Double? = null,
     val speakerPreview: SpeakerPreview? = null,
+    /** Display-only "可能是" hints for an unconfirmed sentence; never synced, drafted or used as an owner. */
+    val speakerCandidates: List<SpeakerCandidate> = emptyList(),
+    /** Display-only trial split (all suggestions); never synced, drafted or used as an owner. */
+    val trialSegments: List<SpeakerSegment> = emptyList(),
 )
 
 /**
@@ -55,12 +63,15 @@ class TranscriptBuffer(private val retentionMs: Long) {
     @Synchronized
     fun setSpeaker(id: String, speaker: String?, segments: List<SpeakerSegment> = emptyList(),
                    speakerState: String? = null, speakerScore: Double? = null,
-                   speakerPreview: SpeakerPreview? = null): Utterance? {
+                   speakerPreview: SpeakerPreview? = null,
+                   speakerCandidates: List<SpeakerCandidate> = emptyList(),
+                   trialSegments: List<SpeakerSegment> = emptyList()): Utterance? {
         val index = items.indexOfFirst { it.id == id }
         if (index < 0) return null
         return items[index].copy(speaker = speaker, segments = segments,
             speakerState = speakerState, speakerScore = speakerScore,
-            speakerPreview = speakerPreview).also { items[index] = it }
+            speakerPreview = speakerPreview, speakerCandidates = speakerCandidates,
+            trialSegments = trialSegments).also { items[index] = it }
     }
 
     @Synchronized

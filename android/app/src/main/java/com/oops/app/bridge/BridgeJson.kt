@@ -35,7 +35,8 @@ object BridgeJson {
         .put("backendUrl", s.backendUrl)
         .put("hasBackendToken", s.hasBackendToken)
         .put("speakerInfo", s.speakerInfo)
-        .put("speakerPreviewEnabled", s.speakerPreviewEnabled).put("liveSpeakerStatus", s.liveSpeakerStatus ?: NULL)
+        .put("speakerPreviewEnabled", s.speakerPreviewEnabled).put("recordSession", s.recordSession)
+        .put("recordingsPending", s.recordingsPending).put("recordingUpload", s.recordingUpload).put("liveSpeakerStatus", s.liveSpeakerStatus ?: NULL)
         .put("liveSpeakers", JSONArray(s.liveSpeakers)).put("liveOverlap", s.liveOverlap)
         .put("testWavName", s.testWavName)
         .put("sourceDetail", s.sourceDetail ?: NULL)
@@ -60,10 +61,14 @@ object BridgeJson {
         .put("tag", u.tag ?: NULL).put("tagProb", u.tagProb ?: NULL).put("tagEngine", u.tagEngine ?: NULL)
         .put("words", JSONArray(u.words.map { JSONObject().put("text", it.text).put("startMs", it.startMs).put("endMs", it.endMs) }))
         .put("segments", segments(u.segments))
+        .put("speakerCandidates", com.oops.app.backend.ApiJson.speakerCandidates(u.speakerCandidates))
+        .put("trialSegments", segments(u.trialSegments))
 
     private fun segments(items: List<com.oops.app.buffer.SpeakerSegment>) = JSONArray(items.map {
         JSONObject().put("startMs", it.startMs).put("endMs", it.endMs).put("text", it.text)
             .put("speaker", it.speaker ?: NULL).put("score", it.score).put("source", it.source ?: NULL).put("approx", it.approx)
+            .put("confidence", it.confidence ?: NULL).put("tier", it.tier).put("overlap", it.overlap)
+            .put("candidates", com.oops.app.backend.ApiJson.speakerCandidates(it.candidates))
     })
 
     fun summary(s: OopsEvent.SessionSummary): JSONObject {
@@ -105,6 +110,16 @@ object BridgeJson {
         .put("whenRaw", d.whenRaw ?: NULL)
         .put("constraint", d.constraint ?: NULL)
         .put("assigneeCandidates", JSONArray(d.assigneeCandidates))
+        .put("owner", d.who.ifBlank { null } ?: NULL).put("suggestedOwner", d.suggestedOwner ?: NULL)
+        .put("ownerSource", d.ownerSource).put("ownerConfidence", d.ownerConfidence ?: NULL)
+        .put("tier", d.tier).put("reason", d.reason)
+        .put("ownerCandidates", com.oops.app.backend.ApiJson.speakerCandidates(d.ownerCandidates))
+        .put("modelRevision", d.modelRevision).put("reviewStatus", d.reviewStatus)
+        .put("ownerSelectionSource", d.ownerSelectionSource)
+        .put("taskContext", d.context?.let { c -> JSONObject().put("quote", c.quote)
+            .put("resolutions", JSONArray(c.resolutions.map { JSONObject().put("phrase", it.phrase).put("meaning", it.meaning).put("evidence", it.evidence) }))
+            .put("missing", JSONArray(c.missing)).put("ownerRole", c.ownerRole).put("clauseSpeaker", c.clauseSpeaker ?: NULL)
+            .put("otherTasks", JSONArray(c.otherTasks)) } ?: NULL)
         .put(
             "evidence",
             JSONObject()
@@ -137,6 +152,8 @@ object BridgeJson {
                 .put("speakerState", e.speakerState)
                 .put("speakerPreview", e.preview?.let(::preview) ?: NULL)
                 .put("segments", segments(e.segments))
+                .put("candidates", com.oops.app.backend.ApiJson.speakerCandidates(e.candidates))
+                .put("trialSegments", segments(e.trialSegments))
         is OopsEvent.UtteranceTagged -> "asr.tag" to utterance(e.utterance)
         is OopsEvent.SessionSummary -> "session.summary" to summary(e)
         is OopsEvent.Pruned -> "transcript.pruned" to JSONObject().put("ids", JSONArray(e.ids))

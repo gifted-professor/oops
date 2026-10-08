@@ -26,6 +26,7 @@
     lines: new Map(), // utterance id → <li>
     records: new Map(),
     commitments: [],
+    ownerEdits: new Map(), // manual selections remain visible when model hints refresh
     summary: {}, history: null, historySummary: {}, notices: new Map(), activeNotices: [],
     sheet: null, // { kind, ... }
     card: null, // { data, sel, before, after }
@@ -113,10 +114,11 @@
         $('partial').textContent = '';
         addLine(p);
         break;
-      case 'asr.speaker': setLineSpeaker(p.id, p.speaker, p.segments, p.score, p.speakerState, p.speakerPreview); break;
+      case 'asr.speaker': setLineSpeaker(p.id, p.speaker, p.segments, p.score, p.speakerState, p.speakerPreview, p.candidates, p.trialSegments); break;
       case 'asr.tag':
         if (S.records.has(p.id)) {
-          S.records.set(p.id, { ...S.records.get(p.id), ...p });
+          // A tag can land after the speaker answer; it must not reset speaker, split or hint fields.
+          S.records.set(p.id, { ...S.records.get(p.id), tag: p.tag, tagProb: p.tagProb, tagEngine: p.tagEngine });
           renderLine(p.id);
         }
         break;
@@ -145,6 +147,9 @@
         if (S.sheet?.kind === 'card' && S.card?.data.id === p.cardId) closeSheet();
         break;
       case 'action.draft': openDraft(p); break;
+      case 'action.suggestion':
+        if (window.OopsDraftState.merge(S.draft, p) && S.sheet?.kind === 'draft') renderSheet();
+        break;
       case 'action.result': onActionResult(p); break;
       case 'latency': S.latency = p; break;
       case 'saved.items': openSheet({ kind: 'saved', items: p.items || [] }); break;
@@ -173,6 +178,7 @@
     S.lines.clear();
     S.records.clear();
     S.commitments = []; S.summary = {}; S.notices.clear(); S.activeNotices = []; renderNoticeBanners();
+    S.ownerEdits.clear();
     $('partial').textContent = '';
     $('pruned-note').hidden = true;
     $('empty').hidden = false;
@@ -260,10 +266,12 @@
   }
 
   /** The voiceprint answer arrives after the caption; add or replace the name chip in place. */
-  function setLineSpeaker(id, speaker, segments = [], score = null, state = null, preview = null) {
+  function setLineSpeaker(id, speaker, segments = [], score = null, state = null, preview = null, candidates = [], trial = []) {
     const u = S.records.get(id);
     if (!u) return;
     u.speaker = speaker;
+    u.speakerCandidates = candidates || [];
+    u.trialSegments = trial || [];
     u.segments = segments;
     u.speakerScore = score;
     u.speakerState = state;
@@ -272,7 +280,23 @@
   }
 
   const TAG_LABELS = { commitment: '承诺/指派', decision: '决定', idea: '想法', constraint: '约束', chitchat: '寒暄', uncertain: '待判断' };
+  // Below-threshold voiceprint ranking, shown only as a grey guess; it never fills an owner.
+  const HINT_FLOOR = 0.35, HINT_MARGIN = 0.05;
+  function speakerHintHtml(u) {
+    const c = (u.speakerCandidates || []).filter((x) => x && typeof x.score === 'number' && Number.isFinite(x.score));
+    if (u.speakerState !== 'unconfirmed' || !c.length || c[0].score < HINT_FLOOR) return '';
+    const text = c.length < 2 || c[0].score - c[1].score >= HINT_MARGIN
+      ? `可能是 ${speakerLabel(c[0].name)}` : `${speakerLabel(c[0].name)} / ${speakerLabel(c[1].name)}？`;
+    return `<span class="spk spk-status spk-hint">${esc(text)} · ${c[0].score.toFixed(2)}</span>`;
+  }
+  function trialGuess(s) {
+    const c = (s.candidates || []).filter((x) => x && typeof x.score === 'number' && Number.isFinite(x.score));
+    return c.length && c[0].score >= HINT_FLOOR && (c.length < 2 || c[0].score - c[1].score >= HINT_MARGIN)
+      ? `可能是 ${speakerLabel(c[0].name)}` : '身份待确认';
+  }
   function speakerStatusHtml(u) {
+    const hint = speakerHintHtml(u);
+    if (hint) return hint;
     const text = {pending:'声纹识别中', unconfirmed:'声纹未确认', too_short:'语音太短',
       busy:'声纹请求拥挤', audio_unavailable:'声纹音频不可用', unsupported:'声纹服务不可用', error:'声纹请求失败'}[u.speakerState];
     if (!text) return '';
@@ -284,16 +308,26 @@
     const u = S.records.get(id), li = S.lines.get(id);
     if (!u || !li) return;
     const speaker = speakerLabel(u.speaker);
-    const experiment = S.state.speakerPreviewEnabled && u.speakerPreview?.experimental && u.speakerPreview.segments?.length;
+    const experiment = !u.segments?.length && S.state.speakerPreviewEnabled && u.speakerPreview?.experimental && u.speakerPreview.segments?.length;
     const words = experiment ? `<span class="preview-note">说话人拆分试验${u.speakerPreview.jevUsed ? ' · Jev 辅助' : ''}</span>` +
       u.speakerPreview.segments.map((s) => `<span class="preview-segment${s.kind === 'overlap' ? ' preview-overlap' : ''}"><span class="spk spk-status">${esc(s.kind === 'overlap' ? '疑似多人同时说话' : speakerLabel(s.speaker) || '身份待确认')}${s.source === 'voiceprint+context' ? ' · 待核对' : ''}</span>${esc(s.text)}</span>`).join('') :
-      u.segments?.length ? u.segments.map((s) => `<span class="${s.approx ? 'approx-segment' : ''}"><span class="spk">${esc(speakerLabel(s.speaker) || '未知')}</span>${esc(s.text)}</span>`).join('') :
-      `${speaker ? `<span class="spk">${esc(speaker)}</span>` : ''}${speakerStatusHtml(u)}${esc(u.text)}`;
+      u.segments?.length ? u.segments.map((s) => {
+        const status = s.overlap ? '多人同时说' : s.tier === 'A' ? '高可信' : '建议 · 待核对';
+        const names = s.overlap ? (s.candidates || []).map(c => c.name).join(' / ') : speakerLabel(s.speaker) || '身份待确认';
+        return `<span class="speaker-segment tier-${esc(s.tier || 'C')}${s.approx ? ' approx-segment' : ''}"><span class="spk">${esc(names)} · ${status}</span>${esc(s.text)}</span>`;
+      }).join('') :
+      u.trialSegments?.length > 1 ? `<span class="preview-note">按人拆分（试验 · 建议）</span>` + u.trialSegments.map((s) => {
+        const names = s.overlap ? (s.candidates || []).map(c => speakerLabel(c.name)).join(' / ') + ' · 多人同时说'
+          : s.speaker ? `${speakerLabel(s.speaker)} · 建议` : trialGuess(s);
+        return `<span class="speaker-segment trial-segment${s.overlap ? ' preview-overlap' : ''}"><span class="spk spk-status">${esc(names)}</span>${esc(s.text)}</span>`;
+      }).join('') :
+      `${speaker ? `<span class="spk">${esc(speaker)} · 待核对</span>` : ''}${speakerStatusHtml(u)}${esc(u.text)}`;
     li.querySelector('div').innerHTML = `${words}${TAG_LABELS[u.tag] ? ` <span class="badge value-tag">${TAG_LABELS[u.tag]}</span>` : ''}`;
   }
 
   function setSummary(p) {
     if (p.sessionId !== S.state.sessionId) return;
+    p = { ...p, commitments: (p.commitments || []).map(u => u.reviewStatus === 'confirmed' ? u : { ...u, ...(S.ownerEdits.get(u.id) || {}) }) };
     S.summary = p; S.commitments = p.commitments || [];
     renderStatus();
     if (S.sheet?.kind === 'commitments') renderSheet();
@@ -386,7 +420,7 @@
     const summary = readonly ? S.historySummary : S.summary;
     function group(title, rows, todo = false, ideas = false) {
       return `<p class="section-title">${title} · ${rows.length}</p><div class="cands">${(ideas ? rows.slice(0, S.showAllIdeas ? rows.length : 5) : rows).map(u => {
-        const hint = todo ? `${u.ownerHint || u.owner_hint || '负责人待定'} · ${u.whenRaw || u.when_raw || '截止待定'}${u.taskStatus === 'created' || u.task_status === 'created' ? ' · 已建飞书任务' : ''}` : '';
+        const hint = todo ? `${u.ownerHint || u.owner_hint || '负责人待定'}${u.suggestedOwner || u.suggested_owner ? ' · 建议 ' + (u.suggestedOwner || u.suggested_owner) : ''} · ${u.reviewStatus === 'confirmed' || u.review_status === 'confirmed' ? '人工已确认' : u.ownerReviewStatus === 'selected' ? '人工已选择，待确认任务' : '待核对'} · ${u.whenRaw || u.when_raw || '截止待定'}${u.taskStatus === 'created' || u.task_status === 'created' ? ' · 已建飞书任务' : ''}` : '';
         return `<button class="cand" data-act="${readonly ? 'history-quote' : 'commitment-open'}" data-id="${esc(u.id)}"><span><span class="t">${esc(u.text)}</span><span class="meta">${clock(u.startMs ?? u.start_ms)}${u.speaker ? ' · ' + esc(speakerLabel(u.speaker)) : ''}${hint ? '<br>' + esc(hint) : ''}${u.audioExpired || readonly ? ' · 原声未保留' : ''}</span></span></button>`;
       }).join('') || '<p class="fine">暂无</p>'}</div>${ideas && rows.length > 5 && !S.showAllIdeas ? '<button class="chip ghost" data-act="ideas-all">展开全部想法</button>' : ''}`;
     }
@@ -499,13 +533,47 @@
   // ---- action draft -----------------------------------------------------------------------
 
   function openDraft(d) {
-    S.draft = { data: d, status: 'editing', result: null, error: null, submitted: false };
+    S.draft = window.OopsDraftState.create(d);
     openSheet({ kind: 'draft' });
+  }
+
+  function editDraftField(field, value) {
+    const previousOwner = S.draft?.data?.who || '';
+    if (!window.OopsDraftState.edit(S.draft, field, value)) return false;
+    if (field === 'who' && previousOwner !== (value || '')) {
+      const model = S.draft.model;
+      send('action.ownerFeedback', {draftId: model.draftId, previousOwner, selectedOwner: value || '',
+        modelSuggestion: model.suggestedOwner || model.who || '', modelTier: model.tier || 'C',
+        modelConfidence: model.ownerConfidence ?? null, modelRevision: model.modelRevision || 0});
+    }
+    if (field === 'who' || field === 'whenIso') {
+      (S.draft.data.evidence?.utteranceIds || []).forEach(id => {
+        const edit = { ...(S.ownerEdits.get(id) || {}) };
+        if (field === 'who') { edit.ownerHint = value; edit.ownerReviewStatus = value ? 'selected' : 'unreviewed'; }
+        else edit.whenRaw = value;
+        S.ownerEdits.set(id, edit);
+      });
+      setSummary(S.summary);
+    }
+    return true;
+  }
+
+  // Context resolution is a model proposal whose quotes the server verified; it never confirms anything.
+  function taskContextHtml(c) {
+    if (!c) return '';
+    const role = { speaker: '说话人自己承诺', addressee: '说话人要求对方去做', named: '原话点名', unknown: '负责人未定' }[c.ownerRole] || '负责人未定';
+    const who = c.clauseSpeaker ? `这句由 ${esc(c.clauseSpeaker)} 说（试验拆分，待核对）· ` : '';
+    return `<div class="task-context">
+      <p class="fine">任务原话：“${esc(c.quote)}” · ${who}${esc(role)}</p>
+      ${(c.resolutions || []).map(r => `<p class="fine">“${esc(r.phrase)}”→ ${esc(r.meaning)}（依据：“${esc(r.evidence)}”）</p>`).join('')}
+      ${(c.missing || []).length ? `<p class="warn-text">还缺：${c.missing.map(esc).join('；')}</p>` : ''}
+      ${(c.otherTasks || []).length ? `<p class="fine">这句还提到：${c.otherTasks.map(esc).join('；')}</p>` : ''}
+    </div>`;
   }
 
   function draftHtml() {
     const { data: d, status, error } = S.draft;
-    const names = [...new Set([...(d.assigneeCandidates || []), ...(d.who ? [d.who] : [])])];
+    const names = [...new Set([...(d.ownerCandidates || []).map(c => c.name), ...(d.assigneeCandidates || []), ...(d.who ? [d.who] : []), ...(d.suggestedOwner ? [d.suggestedOwner] : [])])];
     const options = ['<option value="">请选择负责人</option>']
       .concat(names.map((n) => `<option ${n === d.who ? 'selected' : ''}>${esc(n)}</option>`))
       .join('');
@@ -513,7 +581,11 @@
     const submitted = status === 'waiting' || status === 'failed' || sending;
     return `<div class="grabber"></div>
       <div class="sheet-head"><span class="kicker">Action · 待你确认</span><button class="close" data-act="close" aria-label="关闭">✕</button></div>
+      <p class="owner-tier tier-${esc(d.tier || 'C')}">${d.tier === 'A' ? 'A · 模型高可信' : d.tier === 'B' ? 'B · 建议，请核对' : 'C · 模型未确认负责人'}${S.draft.reviewStatus === 'confirmed' ? ' · 人工已确认' : ' · 待你确认'}</p>
+      <p class="fine">${esc(d.reason || '请核对负责人')}${typeof d.ownerConfidence === 'number' ? ` · 模型建议可信度 ${(d.ownerConfidence * 100).toFixed(0)}%` : ''}</p>
+      ${d.suggestedOwner || d.ownerCandidates?.length ? `<div class="owner-candidates">${[...new Set([d.suggestedOwner, ...(d.ownerCandidates || []).map(c => c.name)].filter(Boolean))].slice(0, 2).map(n => `<button class="btn ghost" data-act="choose-owner" data-name="${esc(n)}" ${submitted ? 'disabled' : ''}>建议 ${esc(n)}</button>`).join('')}</div>` : ''}
       <div class="evidence"><button data-act="play-evidence" data-key="ev-${esc(d.draftId)}" aria-label="回听原声">▶</button><span>“${esc(d.evidence.quote)}”</span></div>
+      ${taskContextHtml(d.taskContext)}
       <label class="field"><span>负责人</span><select id="f-who" ${submitted ? 'disabled' : ''}>${options}</select></label>
       <label class="field"><span>事项</span><textarea id="f-what" ${submitted ? 'disabled' : ''}>${esc(d.what)}</textarea></label>
       <label class="field"><span>截止时间</span><input type="date" id="f-when" ${submitted ? 'disabled' : ''} value="${esc(d.whenIso || '')}">${d.whenRaw ? `<small>原话：${esc(d.whenRaw)}</small>` : ''}</label>
@@ -536,11 +608,12 @@
     }
     // Keep the edits on the draft so a re-render (e.g. after an error) doesn't lose them.
     Object.assign(d, { who, what, whenIso: $('f-when').value || null, constraint: $('f-constraint').value.trim() || null });
-    S.draft.status = 'sending';
+    window.OopsDraftState.confirm(S.draft);
     S.draft.error = null;
     renderSheet();
     send('action.confirm', {
       draftId: d.draftId, who, what, whenIso: d.whenIso || '', whenRaw: d.whenRaw || '', constraint: d.constraint || '',
+      ownerSelectionSource: d.ownerSelectionSource,
     });
   }
 
@@ -614,6 +687,8 @@
       <label class="switch"><span>清除当前地址的访问凭据</span><input type="checkbox" id="set-clear-token"></label>
       <label class="switch"><span>说话人区分（实验：测试中会丢句）</span><input type="checkbox" id="set-spk" ${s.speakerInfo ? 'checked' : ''}></label>
       <label class="switch"><span>实时换人拆分与重叠提示（试验）</span><input type="checkbox" id="set-preview" ${s.speakerPreviewEnabled ? 'checked' : ''}></label>
+      <label class="switch"><span>保存原始录音与转写（会后自动上传团队服务器，约 1.9 MB/分钟）</span><input type="checkbox" id="set-record" ${s.recordSession ? 'checked' : ''}></label>
+      <p class="fine">原始录音：${s.recordingsPending ? `${s.recordingsPending} 场待上传${s.recordingUpload === 'uploading' ? '（上传中）' : ''}` : '全部已上传'}；未上传成功的录音不会被自动清理。</p>
       <div class="actions two" style="margin-top:16px">
         <button class="btn ghost" data-act="close">取消</button>
         <button class="btn primary" data-act="apply-settings">保存</button>
@@ -631,7 +706,8 @@
     const v = S.state.voiceprint || { phase: 'idle' };
     const busy = ['loading', 'saving', 'testing', 'checking'].includes(v.phase);
     const recording = v.phase === 'recording';
-    const name = v.name || S.voiceprintName;
+    const name = ['recording', 'checking', 'review', 'saving', 'testing'].includes(v.phase)
+      ? (v.name || S.voiceprintName) : (S.voiceprintName || v.name);
     const people = v.catalog?.people || [];
     const limit = v.mode === 'test' ? 10 : 30;
     const message = busy ? ({loading: '正在读取声纹列表…', saving: '正在检查并保存声纹…', testing: '正在比较四人的声纹…', checking: '正在检查录音质量…'})[v.phase] : v.message;
@@ -694,6 +770,7 @@
       backendBaseUrl: $('set-url').value.trim(),
       speakerInfo: $('set-spk').checked,
       speakerPreview: $('set-preview').checked,
+      recordSession: $('set-record').checked,
     };
     if ($('set-clear-token').checked) settings.backendToken = '';
     else if ($('set-token').value.trim()) settings.backendToken = $('set-token').value.trim();
@@ -768,7 +845,7 @@
   function historyHtml() {
     return `${sheetHead('往期会议 · 团队文字存档')}${historyTabs()}
       ${(S.sheet.items || []).map(i => `<button class="cand" data-act="history-open" data-id="${esc(i.session_id)}"><span class="t">${esc(i.goal || '会议')}</span><span class="meta">${esc(formatDate(i.started_at))} · ${i.utterance_count} 句</span></button>`).join('') || '<p class="fine">还没有同步的会议文字。</p>'}
-      <p class="footnote">团队共享，仅文字，不含音频。服务器默认保留 30 天。</p>`;
+      <p class="footnote">团队共享。会议文字与原始录音长期保留在团队服务器，删除会议时一并删除。</p>`;
   }
   function historyOpen(p) {
     S.history = p;
@@ -850,6 +927,9 @@
       send('action.status', { draftId: S.draft.data.draftId });
     },
     'open-task': () => send('open.url', { url: S.draft.result.taskUrl }),
+    'choose-owner': (el) => {
+      if (editDraftField('who', el.dataset.name)) renderSheet();
+    },
     'vp-open': () => { S.voiceprintDelete = null; openSheet({ kind: 'voiceprint' }); send('voiceprint.list'); },
     'vp-refresh': () => send('voiceprint.list'),
     'vp-record': () => recordVoiceprint('enroll'),
@@ -883,7 +963,20 @@
     if (act) act(el);
   });
   $('backdrop').addEventListener('click', closeSheet);
-  $('btn-capture').addEventListener('click', () => send(S.state.capturing ? 'capture.stop' : 'capture.start'));
+  $('sheet').addEventListener('input', (e) => {
+    const field = { 'f-who': 'who', 'f-what': 'what', 'f-when': 'whenIso', 'f-constraint': 'constraint' }[e.target.id];
+    if (field) editDraftField(field, e.target.value || (field === 'whenIso' ? null : ''));
+  });
+  $('sheet').addEventListener('change', (e) => {
+    if (e.target.id === 'f-who') editDraftField('who', e.target.value);
+  });
+  $('btn-capture').addEventListener('click', () => {
+    if (S.state.capturing) {
+      const count = S.commitments.filter(u => u.reviewStatus !== 'confirmed' && u.review_status !== 'confirmed').length;
+      if (count) toast(`${count} 条负责人待确认`);
+    }
+    send(S.state.capturing ? 'capture.stop' : 'capture.start');
+  });
   $('btn-oops').addEventListener('click', () => send('recall.trigger'));
   $('btn-saved').addEventListener('click', () => send('saved.list'));
   $('btn-commitments').addEventListener('click', () => openSheet({ kind: 'commitments' }));

@@ -26,6 +26,9 @@ data class EngineState(
     val hasBackendToken: Boolean = false,
     val speakerInfo: Boolean = false,
     val speakerPreviewEnabled: Boolean = false,
+    val recordSession: Boolean = false,
+    val recordingsPending: Int = 0,
+    val recordingUpload: String = "idle",
     val liveSpeakerStatus: String? = null,
     val liveSpeakers: List<String> = emptyList(),
     val liveOverlap: Boolean = false,
@@ -66,7 +69,9 @@ sealed interface OopsEvent {
     data class SpeakerIdentified(val utteranceId: String, val speaker: String?, val score: Double?,
         val segments: List<com.oops.app.buffer.SpeakerSegment> = emptyList(),
         val speakerState: String = if (speaker != null) "matched" else "unconfirmed",
-        val preview: com.oops.app.buffer.SpeakerPreview? = null) : OopsEvent
+        val preview: com.oops.app.buffer.SpeakerPreview? = null,
+        val candidates: List<com.oops.app.buffer.SpeakerCandidate> = emptyList(),
+        val trialSegments: List<com.oops.app.buffer.SpeakerSegment> = emptyList()) : OopsEvent
     data class UtteranceTagged(val utterance: Utterance) : OopsEvent
     data class SessionSummary(val sessionId: String, val commitments: List<Utterance>, val audioIds: Set<String>,
         val grouped: Map<String, List<Utterance>> = emptyMap(), val hints: Map<String, JSONObject> = emptyMap(), val notices: List<JSONObject> = emptyList()) : OopsEvent

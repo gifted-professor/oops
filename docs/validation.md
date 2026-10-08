@@ -278,3 +278,15 @@ Redmi 原生集成测试实录手机麦克风 10 秒并经 HTTPS 调用在线 te
 Chrome当前账号内同时存在两个AppID；充值已到账（余额8.97、欠费0），手机实际应用的正式2.0小时版已开通，原30小时包耗尽。未修改授权或客户端凭据。真实ASR已恢复。`meetingFeatures`在实际香港后端passed=true，3句ASR原文精确存档、停止时间、原话问答、Jev冲突、测试记录删除均通过；`meetingHttp`四类合成标签/防重/往期搜索/历史冲突/删除及迟到同步拒绝也passed=true。修复了一处测试把nullable404当作异常的误判，主APK未改变。设置恢复一致、测试包卸载、Mac音源恢复，无新飞书任务。报告、控制台截图与真人验收限制见 [P0上线记录](p0-rollout.md) 最新节。
 
 这些成功结果替代先前“当前ASR403仍阻断”的状态。自动标签、判断、讲话人准确率和真人长会话仍需试用验收。
+
+### 2026-10-08：归属 v2 工程验证与数据准备
+
+`./scripts/check.sh lintDebug` 完整通过：101 项 JVM 测试（0 失败/跳过）、86 项 Python 测试、H5 草稿状态与声纹换人 UI 流程回归，Debug APK 构建与 lint 成功。统计测试使用 voice venv 的 numpy，未跳过拟合测试。最终 APK SHA256 为 `8e3a68ad21574196c006e6ccd0eb519e882e7bfaa4650511ecd38235b2652132`，已安装至目标 `W4W8Q8LVBQ8XZHLF`，保留应用数据；未操作其他两台手机。
+
+一段 DJI 开发音频 20.51 秒做运行检查，拆出 10 段、3 段 overlap、原文完整，计算约 789 ms；未拟合概率为 null，结果没有 A。该检查不判断名字对错。DJI 冻结 55 题已按原 ID、片段和 0236 开发 / 0238 保留划分迁入独立题集，旧目录与旧答案未修改。本机盲标页 `http://127.0.0.1:8795/` 可切换题集，目前核实 0/55。未读取真实保留预测指标，未消费保留集，也未签发通过报告。
+
+香港已首发部署并验证认证、分段同步、负责人不预填；四个归属门禁全部关闭。真实链路会议开发/保留音频、独立盲标和最终验收仍待完成。今日现场录入准备音频已标为 `voiceprint-enrollment`，程序禁止拿它作会议开发或保留集。任务卡修改反馈持久化在手机私有 `files/owner-feedback/<session_id>.json`，只作待核实材料，不传香港、不自动当真值。
+
+本机证据目录 `evidence/speaker-attribution/` 包含最终检查日志、APK 哈希、运行检查、发布基线、部署结果和录入用途记录；不含可公开的准确率结论。完整操作见 [验收说明](speaker-attribution-runbook.md)。
+
+实际双端比对发现 Python 3.14 / 3.10 的 `ast.dump` 格式不同，已改成稳定逐字段 AST 编码并升级 `#decisions-v2`。同源码的三个指纹、选中定义和 global 引用集合均在两端实测一致，证据 `evidence/fingerprint-python-compatibility.json`。兼容更新再次通过关闭开关的部署检查，备份 `/var/backups/oops-meeting/attribution-20261008T114855Z`。

@@ -5,13 +5,13 @@
 
 音频坐标统一约定：ASR 返回连接内时间，App 先加该连接的 `baseMs`；App 内部及所有 HTTP 音频时间字段均为会话坐标。`clip_start_ms` 是上传 PCM 第一个样本的会话时间。后端只在模型计算中使用 `t - clip_start_ms`，响应再加回。草稿的 `reference_time` 仍是 ISO 8601 绝对时间。
 
-候选、草稿原话及上下文可增加 `tag`、`words:[{text,start_ms,end_ms}]`、`segments:[{start_ms,end_ms,text,speaker,score,source,approx}]`；旧后端可忽略新增字段。原文必须完整保留，分段文本拼接须等于 ASR 定稿全文，起草和保存按原句 ID 从会话索引取最新信息。
+候选、草稿原话及上下文可增加 `tag`、`words:[{text,start_ms,end_ms}]`、`segments:[{start_ms,end_ms,text,speaker,score,source,approx,confidence,tier,overlap,candidates}]`；旧后端可忽略新增字段。原文必须完整保留，分段文本拼接须等于 ASR 定稿全文，起草和保存按原句 ID 从会话索引取最新信息。历史会议同步也保留分段；坏段降为未知，整组拼接或边界失效时整句降为未知，不能删掉原文。
 
 ## 服务地址与鉴权
 
 当前部署 base URL：`https://giftedprofessor.xyz/oops-meeting`，例如确认地址为 `/oops-meeting/v1/actions/confirm`。部署后端监听回环，由 HTTPS 入口转发；`OOPS_API_TOKEN` 设置后所有接口（含 GET `/healthz`）要求 `Authorization: Bearer <服务访问凭据>`，鉴权失败返回 401 `UNAUTHORIZED`，不会触发飞书调用。
 
-Android 设置按规范化 base URL 保存访问凭据；恢复旧操作时使用该操作原地址的凭据。客户端仅通过 HTTPS 或本机回环发送凭据；H5 状态只暴露 `hasBackendToken`，不返回凭据。`GET /healthz` 返回 `status/jev/voiceprint/feishu/segments_validated`，不返回飞书授权或密钥。
+Android 设置按规范化 base URL 保存访问凭据；恢复旧操作时使用该操作原地址的凭据。客户端仅通过 HTTPS 或本机回环发送凭据；H5 状态只暴露 `hasBackendToken`，不返回凭据。`GET /healthz` 返回 `status/jev/voiceprint/feishu/segments_validated/strict_a_enabled/self_owner_enabled/named_owner_enabled`，不返回飞书授权或密钥。四个归属门禁首发全部关闭。
 
 服务器 `--state-dir /var/lib/oops/backend` 持久化映射与确认操作。新 Oops 组织的四人名单为黄丽萍、江古月、洪玉麟、林春源，Lydia 是黄丽萍的别名。`OOPS_STRICT_PEOPLE=1` 时未配置负责人会明确报错。
 
@@ -64,6 +64,13 @@ Jev 适配建议（已核对 [官方 Choice 文档](https://docs.typesafe.ai/pri
 ```json
 {
   "who":null,
+  "owner":null,
+  "suggested_owner":null,
+  "owner_source":"none",
+  "owner_confidence":null,
+  "tier":"C",
+  "reason":"承诺短语的说话人未知",
+  "owner_candidates":[],
   "what":"把方案发给对方",
   "when":{"iso":"2026-10-09","raw":"周五前"},
   "constraint":"预算控制在十万以内",
@@ -71,6 +78,8 @@ Jev 适配建议（已核对 [官方 Choice 文档](https://docs.typesafe.ai/pri
 }
 ```
 无法解析时间时 `when` 可以为 null，或 `{ "iso":null, "raw":"原始时间措辞" }`。负责人不确定时返回 null，让用户选择。Jev 负责选择／判断；自由文本草稿提取需要独立 LLM 或规则实现。
+
+`who` 兼容字段等于 `owner`。只有共同严格门禁及对应本人/点名门禁通过，才返回 A 档非空 `owner`；一键人工确认后才调用 confirm。B 仅返回 `suggested_owner`，界面可点选且不预填；C 留空。`owner_source` 为 `named/self/none`，`owner_confidence` 是独立校准的承诺短语/行动绑定正确概率，未拟合为 null。候选最多两人、分数降序，仅表示相似度。多承诺返回 `commitments` 中的原句 ID、字区间和类型，并提示拆成独立行动。晚到模型结果不得覆盖用户编辑的负责人、事项、日期、约束或已提交确认快照。
 
 ## 3. POST /v1/actions/confirm
 
@@ -160,7 +169,9 @@ App 可选接口重试策略：IO、429、5xx 最多重试 2 次，间隔 1、3 
   "utterance_id":"u2", "speaker":"洪玉麟", "score":0.81, "runner_up":0.42,
   "engine":"campplus-zh", "segments_validated":true,
   "segments":[{"start_ms":11700,"end_ms":16100,"text":"我周五前把方案发给你。",
-    "speaker":"洪玉麟","score":0.81,"source":"voiceprint","approx":false}]
+    "speaker":"洪玉麟","score":0.81,"source":"voiceprint","approx":false,
+    "confidence":null,"tier":"B","overlap":false,
+    "candidates":[{"name":"洪玉麟","score":0.81},{"name":"林春源","score":0.42}]}]
 }
 ```
 
@@ -168,9 +179,13 @@ App 可选接口重试策略：IO、429、5xx 最多重试 2 次，间隔 1、3 
 
 `source` 为 `voiceprint`（达到普通/短段对应阈值，先锁定，Jev 不可改）、`voiceprint+context`（未锁定段，经 Jev 概率 ≥0.7 且声纹前两名守卫通过）、或 null（未知）。`approx` 表示词/原文时间映射是否近似，不能用近似切字自动解析“我”的负责人。Jev 批量裁决只包含未锁定段，故障保持未知。
 
-本地后端默认关闭拆分和 self 自动填人。只有 `voiceprint.py split-eval` 在冻结参数后的独立验收集通过，生成 `models/voiceprint/split-validation.json`，且相关判断代码、模型、注册声纹、标注集和人工真值指纹仍一致，后端重启后才允许启用。代码指纹只覆盖拆分/负责人/评估判断及其源代码依赖的规范化 AST，不含飞书与召回等无关代码；失效原因输出到后端日志。未通过时返回 `segments:[], segments_validated:false`。负责人自动填写另需独立验收集至少 15 个真实 self 案例，覆盖率 ≥60%、准确率 ≥95%，自动填人不超过 20 条时必须零错误；失败时拆分可启用而 self 仍留空。
+`confidence` 是段内非重叠可辨认字中至少 90% 归属预测说话人的校准概率，不等于整段所有字正确；未拟合为 null。余弦 `score/runner_up/candidates.score` 与 Jev 原始概率都不能替代。有效名字可为 B+null，A 必须具备校准概率。重叠字固定 `overlap=true,speaker=null,tier=C`，给出最多两名候选；近似、未知不能进入 A。
 
-负责人先区分明确点名/self/未知；点名须有指派关系，“发给某人”不算。self 必须只有一个明确的第一人称承诺，承诺短语完整位于一个 `source=voiceprint, approx=false` 的分段中，并已通过自动填人验收。跨段、多个承诺、近似、Jev 辅助声纹和未知均留空，交由用户选择。
+后端默认关闭拆分显示、严格 A、本人和点名预填。开发集冻结后，完整保留集只做一次最终判定；精确单侧 95% 错名上界在段和含 A 段的句两个单位均 ≤2% 才可启用严格 A。本人和点名的行动绑定准确率下界各需 ≥95%，本人覆盖率还需 ≥60%。20 条零错的错率上界约 13.9%，只能返回证据不足。拆分最低线通过而严格证据不足时，只显示建议。未通过显示门禁时返回 `segments:[],segments_validated:false`。
+
+schema 2 验收核对判定代码及依赖、两种模型、校准器、线上实际生效声纹和冻结/消费证据。重新录入声纹会清空缓存、先验并关闭归属开关；不能复用旧验收。线上验收元数据由 Mac 完整核验后签名，服务器固定可信签名并再次检查当前指纹；音频与人工标注保持本机。旧 schema 报告不会启用 v2。
+
+负责人先区分明确点名/self/未知；点名须有指派关系，“发给某人”不算。self 必须只有一个明确的第一人称承诺，承诺短语完整位于一个非重叠、非近似的 A 段中，且独立 owner 概率及门禁通过。集体承诺、跨段、多个承诺、重叠、近似和未知留空，交由用户选择。模型 A 显示“高可信”，人工核对才显示“已确认”。
 
 ## 本场承诺索引
 
@@ -243,7 +258,7 @@ pyannote 3.0 局部编号不作为身份，不跨不连续发言共用声纹判�
 
 ### 会议文字接口
 
-全部要求 App 全权限凭据，声纹邀请凭据返回 403；没有有效凭据返回 401。公网部署仍需设置 `OOPS_API_TOKEN`。文件存于 `<state-dir>/meetings/<session_id>.json`，目录 0700、文件 0600，带锁、原子写入。默认保留 30 天，`OOPS_MEETING_RETENTION_DAYS` 可调整；读取/同步时清理过期文字。删除的编号保留无文字标记，阻止延迟请求重建该场。
+全部要求 App 全权限凭据，声纹邀请凭据返回 403；没有有效凭据返回 401。公网部署仍需设置 `OOPS_API_TOKEN`。文件存于 `<state-dir>/meetings/<session_id>.json`，目录 0700、文件 0600，带锁、原子写入。默认长期保留（`OOPS_MEETING_RETENTION_DAYS=0`），只在用户删除会议时删除；设为正数天数才会在读取/同步时清理过期文字。删除的编号保留无文字标记，阻止延迟请求重建该场。
 
 | 接口 | 请求/响应 |
 |---|---|
@@ -258,3 +273,17 @@ pyannote 3.0 局部编号不作为身份，不跨不连续发言共用声纹判�
 App 每场队列绑定开始时的后端；20 秒或累积 30 句发送，同一队列单请求，停止时标记 ended_at 并最终发送。失败指数退避，404/501 停用，不合法数据等永久错误停止队列。队列在内存中，进程被系统结束时尚未成功同步的文字可能丢失；已同步内容仍在服务器。`memorySync` 默认开，可关闭自动发送。部署/安装前须按本轮计划确认四位成员同意文字上传。
 
 `healthz` 新增 `notices:true/meetings:true`，只表示接口存在，不表示 Jev 中文判断已验收。
+
+
+## 原始录音与转写存档 `/v1/recordings/{session_id}`
+
+原始录音、逐句定稿和流式识别原始返回是团队资产：手机每场默认保存（设置可关），会后由 App 自动上传，服务器长期保留，删除会议时一并删除。仅 App 全权限凭据可用，声纹邀请凭据 403，无凭据 401。存于 `<state-dir>/recordings/<session_id>/`（目录 0700、文件 0600）。
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/manifest` | `{"files":[{"name","size","sha256"}],"meta":{}}`；`name` ∈ `audio.pcm`（16 kHz 单声道 s16le，会话时间轴，断流补静音）、`finals.jsonl`、`asr.jsonl`、`meta.json`。返回 `{"complete","received":{name:bytes}}`，用于断点续传；清单变化时超出新大小的文件从零重传 |
+| PUT | `/{name}?offset=N` | 原始字节分块（≤1.1 MB），头 `X-Content-SHA256` 为本块哈希；`offset` 必须等于已收字节，否则 409 并返回 `received` |
+| POST | `/complete` | 逐个整文件复算 SHA-256；不一致的文件删除并 409（`received:0`）；全部一致写 `complete.json` |
+| GET | （无后缀） | 存档状态 |
+
+已删除会议的编号返回 410，延迟重试不能重建录音。手机只在 `complete` 成功后写 `<id>.uploaded`，只清理已确认上传且超过 7 天（或超出 2 GB）的本地副本；未上传成功的录音永不自动删除。Mac 每晚 03:30 由 `local.oops.archive-pull` 用 rsync 镜像服务器 `recordings/` 与 `meetings/` 到 `/Volumes/GPFS/Users/a1234/oops-archive`（镜像删除）。

@@ -53,7 +53,7 @@ class FeatureTest(unittest.TestCase):
     def test_judgements(self): feature_self_test()
     def test_android_instant_sync_readback_and_retention(self):
         with tempfile.TemporaryDirectory() as scratch:
-            meetings = Meetings(scratch)
+            meetings = Meetings(scratch, retention_days=30)
             today = dt.datetime.now(dt.timezone.utc).strftime('%Y-%m-%dT%H:%M:%S')
             for fraction in ('', '.123', '.123456', '.123456789'):
                 started = today + fraction + 'Z'
@@ -82,7 +82,7 @@ class FeatureTest(unittest.TestCase):
     def test_atomic_permissions_retention_tasks_and_concurrent_upserts(self):
         with tempfile.TemporaryDirectory() as scratch:
             ops = Operations(os.path.join(scratch, 'operations'))
-            m = Meetings(os.path.join(scratch, 'meetings'), ops)
+            m = Meetings(os.path.join(scratch, 'meetings'), ops, retention_days=30)
             started = dt.datetime.now(dt.timezone.utc).isoformat()
             body = dict(session_id='s', started_at=started, time_zone='UTC', utterances=[utterance()])
             m.sync(body); m.sync(body)
@@ -98,6 +98,9 @@ class FeatureTest(unittest.TestCase):
             old = dict(body, session_id='old', started_at=(dt.datetime.now(dt.timezone.utc)-dt.timedelta(days=31)).isoformat())
             m.sync(old); m.cleanup()
             self.assertFalse(os.path.exists(m.path('old')))
+            forever = Meetings(os.path.join(scratch, 'kept'))
+            forever.sync(old); forever.cleanup()
+            self.assertTrue(os.path.exists(forever.path('old')))  # default: kept until deleted
             self.assertFalse(any(n.endswith('.tmp') for n in os.listdir(m.dir)))
     def test_http_auth_idempotence_open_search_history_conflict_and_delete(self):
         with tempfile.TemporaryDirectory() as scratch:

@@ -23,6 +23,7 @@ class ActionOperationStore(private val dir: File) {
             .put("request", ApiJson.confirmRequest(r))
             .put("draft_id", r.draft.draftId).put("card_id", r.draft.cardId)
             .put("assignees", JSONArray(r.draft.assigneeCandidates))
+            .put("model_revision", r.draft.modelRevision)
             .put("backend_url", operation.backendUrl).put("mock", operation.mock)
             .put("result", JSONObject().put("op_id", r.opId).put("status", operation.result.status)
                 .put("feishu_task", JSONObject().put("guid", operation.result.taskGuid ?: JSONObject.NULL)
@@ -49,11 +50,16 @@ class ActionOperationStore(private val dir: File) {
                     d.getString("who"), d.getString("what"), time?.nullable("iso"), time?.nullable("raw"),
                     d.nullable("constraint"), j.getJSONArray("assignees").strings(),
                     Evidence(e.getJSONArray("utterance_ids").strings(), e.getString("quote"),
-                        e.getLong("clip_start_ms"), e.getLong("clip_end_ms")))
+                        e.getLong("clip_start_ms"), e.getLong("clip_end_ms")),
+                    d.nullable("suggested_owner"), d.optString("owner_source", "none"),
+                    if (d.isNull("owner_confidence")) null else d.optDouble("owner_confidence").takeIf { it.isFinite() && it in 0.0..1.0 },
+                    d.optString("tier", "C"), d.optString("reason", "负责人待确认"),
+                    ApiJson.readSpeakerCandidates(d.optJSONArray("owner_candidates")), j.optLong("model_revision", 0),
+                    d.optString("review_status", "confirmed"), d.optString("owner_selection_source", "user"))
                 val mock = j.getBoolean("mock")
                 val result = ApiJson.actionResult(j.getJSONObject("result")).copy(
                     mock = mock, readBackConfirmed = j.getJSONObject("result").optBoolean("read_back_confirmed"))
-                Operation(ConfirmRequest(r.getString("op_id"), r.getString("session_id"), draft),
+                Operation(ConfirmRequest(r.getString("op_id"), r.getString("session_id"), draft).also { it.freezeWire(r.toString()) },
                     j.getString("backend_url"), mock, result)
             }.getOrNull()
         }

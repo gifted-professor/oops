@@ -1,6 +1,7 @@
 package com.oops.app.backend
 
 import com.oops.app.buffer.SpeakerSegment
+import com.oops.app.buffer.SpeakerCandidate
 import com.oops.app.buffer.WordTime
 import com.oops.app.buffer.ValueTags
 import org.json.JSONArray
@@ -23,6 +24,19 @@ object ApiJson {
         .put("start_ms", s.startMs).put("end_ms", s.endMs).put("text", s.text)
         .put("speaker", s.speaker ?: JSONObject.NULL).put("score", s.score)
         .put("source", s.source ?: JSONObject.NULL).put("approx", s.approx)
+        .put("confidence", s.confidence ?: JSONObject.NULL).put("tier", s.tier).put("overlap", s.overlap)
+        .put("candidates", speakerCandidates(s.candidates))
+
+    fun speakerCandidates(items: List<SpeakerCandidate>) = JSONArray(items.map {
+        JSONObject().put("name", it.name).put("score", it.score)
+    })
+
+    fun readSpeakerCandidates(items: JSONArray?): List<SpeakerCandidate> =
+        (0 until (items?.length() ?: 0)).mapNotNull { i -> items?.optJSONObject(i)?.let { c ->
+            val name = namedSpeaker(c.stringOrNull("name"))
+            val score = c.optDouble("score", Double.NaN)
+            if (name != null && score.isFinite()) SpeakerCandidate(name, score) else null
+        } }.sortedByDescending { it.score }.distinctBy { it.name }.take(2)
 
     fun tagRequest(r: TagRequest): JSONObject = JSONObject()
         .put("session_id", r.sessionId).put("utterance_id", r.utterance.id)
@@ -68,16 +82,43 @@ object ApiJson {
         val time = json.optJSONObject("when")
         val assignees = json.optJSONArray("assignee_candidates") ?: JSONArray()
         return DraftResponse(
-            who = json.stringOrNull("who"),
+            who = namedSpeaker(json.stringOrNull(if (json.has("owner")) "owner" else "who"))?.takeUnless {
+                json.optString("tier") in setOf("B", "C")
+            },
             what = json.optString("what"),
             whenIso = time?.stringOrNull("iso"),
             whenRaw = time?.stringOrNull("raw"),
             constraint = json.stringOrNull("constraint"),
             assigneeCandidates = (0 until assignees.length()).map { assignees.getString(it) },
+            suggestedOwner = namedSpeaker(json.stringOrNull("suggested_owner")),
+            ownerSource = json.optString("owner_source", "none").takeIf { it in setOf("named", "self", "none") } ?: "none",
+            ownerConfidence = json.probabilityOrNull("owner_confidence"),
+            tier = json.optString("tier", "C").takeIf { it in setOf("A", "B", "C") } ?: "C",
+            reason = json.optString("reason", "负责人待确认"),
+            ownerCandidates = readSpeakerCandidates(json.optJSONArray("owner_candidates")),
+            context = json.optJSONObject("task_context")?.let { runCatching { taskContext(it) }.getOrNull() },
         )
     }
 
+    private fun strings(items: JSONArray?, limit: Int) =
+        (0 until minOf(items?.length() ?: 0, limit)).mapNotNull { items?.optString(it)?.trim()?.takeIf(String::isNotEmpty)?.take(80) }
+
+    fun taskContext(json: JSONObject): TaskContext {
+        val items = json.optJSONArray("resolutions") ?: JSONArray()
+        return TaskContext(json.getString("quote").take(200),
+            (0 until minOf(items.length(), 6)).map { i ->
+                val r = items.getJSONObject(i)
+                TaskResolution(r.optString("phrase").take(12), r.getString("meaning").take(60),
+                    r.getJSONArray("evidence").getJSONObject(0).getString("quote").take(60))
+            },
+            strings(json.optJSONArray("missing"), 6),
+            json.optString("owner_role", "unknown").takeIf { it in setOf("speaker", "addressee", "named", "unknown") } ?: "unknown",
+            namedSpeaker(json.stringOrNull("clause_speaker")),
+            strings(json.optJSONArray("other_tasks"), 2))
+    }
+
     fun confirmRequest(r: ConfirmRequest): JSONObject {
+        r.frozenWire()?.let { return JSONObject(it) }
         val d = r.draft
         return JSONObject()
             .put("op_id", r.opId)
@@ -86,6 +127,10 @@ object ApiJson {
                 "draft",
                 JSONObject()
                     .put("who", d.who)
+                    .put("owner", d.who).put("suggested_owner", d.suggestedOwner ?: JSONObject.NULL)
+                    .put("owner_source", d.ownerSource).put("owner_confidence", d.ownerConfidence ?: JSONObject.NULL)
+                    .put("tier", d.tier).put("reason", d.reason).put("owner_candidates", speakerCandidates(d.ownerCandidates))
+                    .put("review_status", d.reviewStatus).put("owner_selection_source", d.ownerSelectionSource)
                     .put("what", d.what)
                     .put("when", JSONObject().put("iso", d.whenIso ?: JSONObject.NULL).put("raw", d.whenRaw ?: JSONObject.NULL))
                     .put("constraint", d.constraint ?: JSONObject.NULL),
@@ -97,7 +142,7 @@ object ApiJson {
                     .put("quote", d.evidence.quote)
                     .put("clip_start_ms", d.evidence.clipStartMs)
                     .put("clip_end_ms", d.evidence.clipEndMs),
-            )
+            ).also { r.freezeWire(it.toString()) }
     }
 
     fun actionResult(json: JSONObject): ActionResult {
@@ -121,16 +166,22 @@ object ApiJson {
         .put("context", JSONArray(r.context.map(::candidate)))
         .put("preview", r.preview).put("clip_end_ms", r.clipEndMs)
 
+    private fun readSegments(segments: JSONArray?): List<SpeakerSegment> =
+        (0 until (segments?.length() ?: 0)).map { i ->
+            val s = segments!!.getJSONObject(i)
+            SpeakerSegment(s.optLong("start_ms", -1), s.optLong("end_ms", -1), s.optString("text"),
+                s.stringOrNull("speaker"), s.optDouble("score", Double.NaN), s.stringOrNull("source"), s.optBoolean("approx", true),
+                s.rawProbability("confidence"), s.optString("tier", "C"), s.optBoolean("overlap", false),
+                readSpeakerCandidates(s.optJSONArray("candidates")))
+        }
+
     fun speakerResult(json: JSONObject): SpeakerResult =
         SpeakerResult(json.stringOrNull("speaker"), json.optDouble("score", 0.0),
-            json.optJSONArray("segments")?.let { segments ->
-                (0 until segments.length()).map { i ->
-                    val s = segments.getJSONObject(i)
-                    SpeakerSegment(s.getLong("start_ms"), s.getLong("end_ms"), s.getString("text"),
-                        s.stringOrNull("speaker"), s.optDouble("score", 0.0), s.stringOrNull("source"), s.optBoolean("approx", true))
-                }
-            }.orEmpty(), json.optBoolean("segments_validated", false),
-            json.optJSONObject("preview")?.let { runCatching { speakerPreview(it) }.getOrNull() })
+            readSegments(json.optJSONArray("segments")), json.optBoolean("segments_validated", false),
+            json.optJSONObject("preview")?.let { runCatching { speakerPreview(it) }.getOrNull() },
+            json.rawProbability("runner_up")?.takeIf { it.isFinite() },
+            readSpeakerCandidates(json.optJSONArray("candidates")),
+            runCatching { readSegments(json.optJSONArray("trial_segments")) }.getOrDefault(emptyList()))
 
     fun speakerPreview(json: JSONObject): com.oops.app.buffer.SpeakerPreview {
         val activities = json.getJSONArray("activities")
@@ -149,4 +200,10 @@ object ApiJson {
 
     private fun JSONObject.stringOrNull(key: String): String? =
         if (isNull(key)) null else optString(key).takeIf { it.isNotEmpty() }
+
+    private fun JSONObject.rawProbability(key: String): Double? =
+        if (!has(key) || isNull(key)) null else optDouble(key, Double.NaN)
+
+    private fun JSONObject.probabilityOrNull(key: String): Double? =
+        rawProbability(key)?.takeIf { it.isFinite() && it in 0.0..1.0 }
 }

@@ -56,11 +56,76 @@ def candidates(rows, limit=60, chars=12000):
         tag = row.get('tag')
         if tag not in (*DIGEST, 'chitchat', 'uncertain', None):
             raise ValueError('标签无效')
-        result.append(dict(id=identifier(row.get('id')), text=text(row.get('text')),
+        saved = dict(id=identifier(row.get('id')), text=text(row.get('text')),
             start_ms=start, end_ms=end, speaker=text(row.get('speaker'), 60) if row.get('speaker') else None,
-            tag=tag))
+            tag=tag)
+        if 'segments' in row:
+            saved['segments'] = speaker_segments(row['segments'], saved)
+        result.append(saved)
     if len({r['id'] for r in result}) != len(result) or sum(len(r['text']) for r in result) > chars:
         raise ValueError('原话重复或文字总量超限')
+    return result
+
+
+def speaker_segments(rows, utterance):
+    """Persist only text attribution fields, never PCM or experimental preview.
+
+    A sync is not a new certification: the flags describe the producing model;
+    automatic ownership still needs the server's current independent gates.
+    """
+    if not isinstance(rows, list) or len(rows) > 256:
+        raise ValueError('说话人分段数量超限')
+    if not rows:
+        return []
+    result, cursor = [], utterance['start_ms']
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ValueError('说话人分段格式无效')
+        start, end = row.get('start_ms'), row.get('end_ms')
+        if (any(type(n) not in (int, float) or not math.isfinite(n) for n in (start, end))
+                or start != cursor or not start < end <= utterance['end_ms']):
+            raise ValueError('说话人分段时间不连续或超出原话')
+        value = text(row.get('text'))
+        if not value:
+            raise ValueError('说话人分段原文为空')
+        speaker = text(row['speaker'], 60) if row.get('speaker') else None
+        score = row.get('score', 0)
+        confidence = row.get('confidence')
+        if type(score) not in (int, float) or not math.isfinite(score) or not -1 <= score <= 1:
+            raise ValueError('声纹相似度无效')
+        if confidence is not None and (type(confidence) not in (int, float)
+                or not math.isfinite(confidence) or not 0 <= confidence <= 1):
+            raise ValueError('说话人置信度无效')
+        tier, source = row.get('tier', 'C'), row.get('source')
+        overlapping, approx = row.get('overlap', False), row.get('approx', False)
+        if tier not in ('A', 'B', 'C') or source not in (None, 'voiceprint', 'voiceprint+context'):
+            raise ValueError('说话人档位或来源无效')
+        if type(overlapping) is not bool or type(approx) is not bool:
+            raise ValueError('说话人重叠或对齐标记无效')
+        if overlapping and (speaker is not None or tier != 'C'):
+            raise ValueError('重叠分段必须未知且为C档')
+        if tier == 'A' and (speaker is None or confidence is None or approx or overlapping or source is None):
+            raise ValueError('A档分段证据不完整')
+        raw_candidates = row.get('candidates', [])
+        if not isinstance(raw_candidates, list) or len(raw_candidates) > 2:
+            raise ValueError('说话人候选数量超限')
+        ranked, seen = [], set()
+        for candidate in raw_candidates:
+            if not isinstance(candidate, dict):
+                raise ValueError('说话人候选无效')
+            name, similarity = text(candidate.get('name'), 60), candidate.get('score')
+            if (not name or name in seen or type(similarity) not in (int, float)
+                    or not math.isfinite(similarity) or not -1 <= similarity <= 1):
+                raise ValueError('说话人候选或分数无效')
+            seen.add(name)
+            ranked.append(dict(name=name, score=similarity))
+        ranked.sort(key=lambda c: -c['score'])
+        result.append(dict(start_ms=start, end_ms=end, text=value, speaker=speaker,
+                           score=score, confidence=confidence, tier=tier, overlap=overlapping,
+                           candidates=ranked, source=source, approx=approx))
+        cursor = end
+    if cursor != utterance['end_ms'] or ''.join(s['text'] for s in result) != utterance['text']:
+        raise ValueError('说话人分段未完整保留原话')
     return result
 
 
@@ -153,9 +218,10 @@ class Meetings:
     def __init__(self, directory, ops=None, retention_days=None, owner=None, deadline=None):
         self.dir, self.ops = directory, ops
         self.owner, self.deadline = owner, deadline
-        self.retention = int(retention_days if retention_days is not None else os.getenv('OOPS_MEETING_RETENTION_DAYS', '30'))
-        if self.retention < 1:
-            raise ValueError('保留期必须大于零')
+        # Meeting text is a long-lived asset: 0 (default) keeps it until a user deletes the meeting.
+        self.retention = int(retention_days if retention_days is not None else os.getenv('OOPS_MEETING_RETENTION_DAYS', '0'))
+        if self.retention < 0:
+            raise ValueError('保留期不能为负数')
         os.makedirs(directory, mode=0o700, exist_ok=True)
         os.chmod(directory, 0o700)
         self.lock = threading.RLock()
@@ -164,6 +230,8 @@ class Meetings:
         return os.path.join(self.dir, identifier(sid) + '.json')
 
     def cleanup(self):
+        if not self.retention:
+            return
         cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=self.retention)
         with self.lock:
             for name in os.listdir(self.dir):

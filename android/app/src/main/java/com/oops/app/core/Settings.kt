@@ -50,6 +50,11 @@ class Settings(context: Context) {
         get() = prefs.getBoolean("speaker_preview", false)
         set(value) = prefs.edit { putBoolean("speaker_preview", value) }
 
+    /** Keep each session's audio + finals in app storage for offline tuning (on unless turned off). */
+    var recordSession: Boolean
+        get() = prefs.getBoolean("record_session", true)
+        set(value) = prefs.edit { putBoolean("record_session", value) }
+
     /** Optional debug-only analysis service; business calls keep their normal backend. */
     var speakerPreviewUrl: String
         get() = prefs.getString("speaker_preview_url", "").orEmpty()

@@ -125,3 +125,21 @@ GET `/healthz` 与业务接口都要求 `Authorization: Bearer <服务访问凭�
 用户完成原服务商登录后，香港原实例已备份并升级两个后端模块。公网healthz的notices/meetings均true；新增接口401/403及同步、防重、搜索、判断、问答、删除检查通过，环境/人员/声纹哈希不变，官网与既有入口正常，无新飞书任务。另修复Android Instant末尾Z/纳秒在香港Python3.10的兼容问题，服务器5项测试与公网往返通过。手机自动同步元数据已实际落盘0600，原设置逐项一致；ASR仍受上游资源权限403阻断，未产生真人转写验收结果。
 
 最新备份、证据、回退与验收限制见 [P0上线记录](p0-rollout.md#2026-10-07-登录后香港部署完成)。以上取代先前“等待SSH/香港未上线”的当前状态；历史条目保留。
+
+## 2026-10-08 UTC：本机 SSH 公钥登录已配置
+
+用户授权添加本机密钥并提供服务器现有密码后，成功登录 `root@103.110.81.78:22`。原配置 `PubkeyAuthentication no`，root 的 `authorized_keys` 为空。已备份至 `/var/backups/oops-ssh/key-20261008T064154Z`，追加本机 `~/.ssh/id_ed25519.pub`，通过 `/etc/ssh/sshd_config.d/00-oops-pubkey.conf` 启用公钥认证。授权文件权限0600、目录0700；`sshd -t`通过后仅reload SSH，保留原密码登录。
+
+公钥指纹：`SHA256:Tc+qHSBE3nP/4Ifxk2ppJA/ZuZrQUEJCNO1GHMYstm0`。禁用密码和交互认证、指定此密钥的连接成功；默认 `ssh -o BatchMode=yes root@103.110.81.78` 也成功。临时密码文件已清理。
+
+本次未部署声纹来源升级包。`oops-backend`仍active，线上 `local_backend.py` SHA256仍为 `18b241634e8e5063153c57b061fd53d8d6b702585b35da94f422958e572a7cf0`；无token的本机healthz返回401。后续部署继续沿用备份、基线校验、替换指定模块、健康及鉴权检查、失败回退流程。
+
+## 2026-10-08 UTC：说话人与任务分级 v2 首发部署
+
+已部署 9 个指定源码模块和关闭验收文件，备份为 `/var/backups/oops-meeting/attribution-20261008T113750Z`，发布工具为 `/opt/oops/releases/speaker-attribution-20261008/speaker-attribution-upgrade.py`。部署前校验发布包、线上基线与两种模型哈希；失败可按工具内备份恢复。服务重启后认证、分段完整持久化往返、未知/重叠/集体承诺不预填负责人检查通过，新增飞书写入 0。线上声纹、人员映射、环境与固定验收公钥均保持一致。
+
+health 为 `ok`，`segments_validated/strict_a_enabled/self_owner_enabled/named_owner_enabled` 全部 false。公网未鉴权 health 返回 401；原 Jev、声纹、飞书、会议、提醒与预览能力均正常。首发只是工程部署，不是说话人准确率或真人验收通过。
+
+已单独初始化固定验收签名公钥 `/etc/oops/acceptance_allowed_signers`；私钥只在 Mac `~/.config/oops/acceptance_ed25519`，未上传。后续真实验收包仅含签名报告、冻结参数和校准器，不携带音频、人工标注或注册向量；只有实际链路验收和当前有效指纹通过才可原子安装。详情见 [操作说明](speaker-attribution-runbook.md) 和 [执行方案](speaker-attribution-plan.md)。
+
+随后修复 Mac Python 3.14 与香港 Python 3.10 的 AST 指纹编码差异。兼容版发布工具为 `/opt/oops/releases/speaker-attribution-20261008-compat/speaker-attribution-upgrade.py`，最新备份为 `/var/backups/oops-meeting/attribution-20261008T114855Z`。再次验证认证、同步、草稿与受保护配置通过，四门禁仍全 false；两端源码指纹与全局引用集合实测一致。

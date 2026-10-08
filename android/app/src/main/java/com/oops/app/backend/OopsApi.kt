@@ -39,15 +39,51 @@ class SpeakerRequest(
 )
 
 data class SpeakerResult(val speaker: String?, val score: Double, val segments: List<SpeakerSegment> = emptyList(),
-    val segmentsValidated: Boolean = false, val preview: com.oops.app.buffer.SpeakerPreview? = null) {
-    fun usableSegments(u: Utterance): List<SpeakerSegment> {
-        if (!segmentsValidated || segments.isEmpty() || segments.joinToString("") { it.text } != u.text) return emptyList()
-        if (segments.first().startMs != u.startMs || segments.last().endMs != u.endMs) return emptyList()
-        if (segments.any { it.startMs < u.startMs || it.endMs > u.endMs || it.endMs <= it.startMs ||
-                !it.score.isFinite() || it.source !in setOf(null, "voiceprint", "voiceprint+context") }) return emptyList()
-        if (segments.zipWithNext().any { (a, b) -> a.endMs != b.startMs }) return emptyList()
-        return segments
+    val segmentsValidated: Boolean = false, val preview: com.oops.app.buffer.SpeakerPreview? = null,
+    val runnerUp: Double? = null,
+    /** Whole-sentence top-2 voiceprint ranking: display-only suggestions, never identity or owner evidence. */
+    val candidates: List<com.oops.app.buffer.SpeakerCandidate> = emptyList(),
+    /** Unvalidated split shown as suggestions only; never segments, owner evidence or synced history. */
+    val trialSegments: List<SpeakerSegment> = emptyList()) {
+    /** Trial parts must still rebuild the exact sentence; otherwise nothing is shown. */
+    fun usableTrial(u: Utterance): List<SpeakerSegment> {
+        if (trialSegments.size < 2 || trialSegments.joinToString("") { it.text } != u.text) return emptyList()
+        return trialSegments.map { s ->
+            s.copy(speaker = namedSpeaker(s.speaker), tier = if (s.overlap || namedSpeaker(s.speaker) == null) "C" else "B",
+                confidence = null, candidates = s.candidates.filter { namedSpeaker(it.name) != null && it.score.isFinite() }
+                    .sortedByDescending { it.score }.distinctBy { it.name }.take(2))
+        }
     }
+    fun usableSegments(u: Utterance): List<SpeakerSegment> {
+        if (segments.isEmpty()) return emptyList()
+        fun unknown() = listOf(SpeakerSegment(u.startMs, u.endMs, u.text, null, 0.0, null,
+            approx = true, overlap = segments.any { it.overlap }))
+        // A local failure must not erase words; untrusted partition coordinates invalidate the whole partition.
+        if (!segmentsValidated || segments.joinToString("") { it.text } != u.text ||
+            segments.first().startMs != u.startMs || segments.last().endMs != u.endMs ||
+            segments.any { it.startMs < u.startMs || it.endMs > u.endMs || it.endMs <= it.startMs } ||
+            segments.zipWithNext().any { (a, b) -> a.endMs != b.startMs }) return unknown()
+        return segments.map { s ->
+            val candidates = s.candidates.filter { namedSpeaker(it.name) != null && it.score.isFinite() }
+                .sortedByDescending { it.score }.distinctBy { it.name }.take(2)
+            val valid = s.score.isFinite() && s.source in setOf(null, "voiceprint", "voiceprint+context") &&
+                s.tier in setOf("A", "B", "C") &&
+                (s.confidence == null || (s.confidence.isFinite() && s.confidence in 0.0..1.0)) &&
+                (s.speaker == null || namedSpeaker(s.speaker) != null)
+            if (!valid) s.copy(speaker = null, score = 0.0, source = null, confidence = null,
+                tier = "C", approx = true, candidates = candidates)
+            else {
+                val uncertain = s.overlap || s.approx || s.speaker == null || s.source == null
+                s.copy(tier = if (uncertain) "C" else if (s.tier == "A" && s.confidence == null) "B" else s.tier,
+                    confidence = if (uncertain) null else s.confidence, candidates = candidates)
+            }
+        }
+    }
+}
+
+/** ASR diarization ids are anonymous labels, never registered identities. */
+fun namedSpeaker(value: String?): String? = value?.trim()?.takeIf {
+    it.isNotEmpty() && !it.matches(Regex("(?:\\d+|speaker[_ -]?\\d+)", RegexOption.IGNORE_CASE))
 }
 
 data class TagRequest(val sessionId: String, val utterance: Candidate, val context: List<Candidate> = emptyList())
@@ -93,7 +129,19 @@ data class DraftResponse(
     val whenRaw: String?,
     val constraint: String?,
     val assigneeCandidates: List<String>,
+    val suggestedOwner: String? = null,
+    val ownerSource: String = "none",
+    val ownerConfidence: Double? = null,
+    val tier: String = "C",
+    val reason: String = "负责人待确认",
+    val ownerCandidates: List<com.oops.app.buffer.SpeakerCandidate> = emptyList(),
+    val context: TaskContext? = null,
 )
+
+/** Server-verified context resolution of the task wording: display only, never confirmed data. */
+data class TaskContext(val quote: String, val resolutions: List<TaskResolution>, val missing: List<String>,
+                       val ownerRole: String, val clauseSpeaker: String?, val otherTasks: List<String>)
+data class TaskResolution(val phrase: String, val meaning: String, val evidence: String)
 
 data class Evidence(
     val utteranceIds: List<String>,
@@ -112,9 +160,27 @@ data class ActionDraft(
     val constraint: String?,
     val assigneeCandidates: List<String>,
     val evidence: Evidence,
+    val suggestedOwner: String? = null,
+    val ownerSource: String = "none",
+    val ownerConfidence: Double? = null,
+    val tier: String = "C",
+    val reason: String = "负责人待确认",
+    val ownerCandidates: List<com.oops.app.buffer.SpeakerCandidate> = emptyList(),
+    val modelRevision: Long = 0,
+    val reviewStatus: String = "unreviewed",
+    val ownerSelectionSource: String = "model",
+    val context: TaskContext? = null,
 )
 
-data class ConfirmRequest(val opId: String, val sessionId: String, val draft: ActionDraft)
+data class ConfirmRequest(val opId: String, val sessionId: String, val draft: ActionDraft) {
+    // Kept outside data-class equality: old confirmed wire payloads must survive schema upgrades verbatim.
+    private var wireSnapshot: String? = null
+    @Synchronized internal fun frozenWire(): String? = wireSnapshot
+    @Synchronized internal fun freezeWire(value: String) {
+        require(wireSnapshot == null || wireSnapshot == value) { "确认快照不可变" }
+        wireSnapshot = value
+    }
+}
 
 data class ActionResult(
     val opId: String,

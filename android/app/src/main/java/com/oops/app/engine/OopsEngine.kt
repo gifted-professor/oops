@@ -82,6 +82,8 @@ object OopsEngine {
         private set
     private lateinit var store: SavedClipStore
     private lateinit var operations: ActionOperationStore
+    private lateinit var ownerFeedback: com.oops.app.store.OwnerFeedbackStore
+    private val ownerFeedbackJobs = kotlinx.coroutines.channels.Channel<() -> Unit>(kotlinx.coroutines.channels.Channel.UNLIMITED)
     private val submitted = ConcurrentHashMap<String, ActionOperationStore.Operation>()
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -134,10 +136,14 @@ object OopsEngine {
     private var previewResultMs = 0L
 
     @Volatile private var sessionId = ""
+    @Volatile private var recorder: com.oops.app.store.SessionRecorder? = null
     @Volatile private var level = 0f
 
     private val cards = ConcurrentHashMap<String, RecallCard>()
     private val drafts = ConcurrentHashMap<String, ActionDraft>()
+    private val ownerHints = ConcurrentHashMap<String, com.oops.app.backend.DraftResponse>()
+    private val hintEpochs = ConcurrentHashMap<String, Long>()
+    private val suggestionEpochs = ConcurrentHashMap<String, Long>()
     private val opIds = ConcurrentHashMap<String, String>() // draftId → op_id, reused on retry
     private val inFlight: MutableSet<String> = ConcurrentHashMap.newKeySet()
     private val recallLatencies = ArrayDeque<Long>()
@@ -155,6 +161,11 @@ object OopsEngine {
         }.getOrDefault(com.oops.app.notice.Agenda()))
         store = SavedClipStore(File(application.filesDir, "saved"))
         operations = ActionOperationStore(File(application.filesDir, "actions"))
+        ownerFeedback = com.oops.app.store.OwnerFeedbackStore(File(application.filesDir, "owner-feedback"))
+        scope.launch(Dispatchers.IO) {
+            for (job in ownerFeedbackJobs) runCatching(job)
+                .onFailure { Log.w(TAG, "local owner feedback unavailable: ${it.javaClass.simpleName}") }
+        }
         operations.list().forEach { operation ->
             val draft = operation.request.draft
             submitted[draft.draftId] = operation
@@ -171,6 +182,45 @@ object OopsEngine {
                 remoteAddress = settings.remoteAddress,
             )
         }
+        scope.launch {
+            delay(5_000)
+            while (isActive) {
+                scheduleUpload()
+                delay(15 * 60_000L)
+            }
+        }
+    }
+
+    // ---- raw asset upload ----------------------------------------------------------------
+
+    private val uploading = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /** Finished sessions go to the team server; never while a meeting is capturing (live ASR keeps the network). */
+    fun scheduleUpload(delayMs: Long = 0) {
+        val transport = api as? com.oops.app.backend.HttpOopsApi ?: return
+        scope.launch(Dispatchers.IO) {
+            delay(delayMs)
+            if (!uploading.compareAndSet(false, true)) return@launch
+            val dir = File(app.filesDir, "recordings")
+            try {
+                val uploader = com.oops.app.store.RecordingUploader(dir, transport)
+                fun active() = if (source != null) sessionId else null
+                for (id in uploader.pending(active())) {
+                    _state.update { it.copy(recordingsPending = uploader.pending(active()).size, recordingUpload = "uploading") }
+                    if (source != null) break
+                    runCatching { uploader.upload(id) }
+                        .onSuccess { if (it) Log.i(TAG, "recording uploaded: $id") }
+                        .onFailure { Log.w(TAG, "recording upload $id failed: ${it.message}") }
+                }
+                val left = uploader.pending(active()).size
+                _state.update { it.copy(recordingsPending = left, recordingUpload = if (left == 0) "done" else "pending") }
+                com.oops.app.store.SessionRecorder.prune(dir, keep = active())
+            } catch (error: Exception) {
+                Log.w(TAG, "recording upload pass failed: ${error.message}")
+            } finally {
+                uploading.set(false)
+            }
+        }
     }
 
     // ---- capture -------------------------------------------------------------------------
@@ -184,8 +234,17 @@ object OopsEngine {
             transcript.clear()
             cards.clear()
             drafts.keys.removeAll { !submitted.containsKey(it) }
+            ownerHints.clear(); hintEpochs.clear(); suggestionEpochs.clear()
             sessionId = UUID.randomUUID().toString()
             sessionIndex.reset(sessionId)
+            recorder?.closeAudio()
+            runCatching { com.oops.app.store.SessionRecorder.prune(File(app.filesDir, "recordings"), keep = null) }
+                .onSuccess { if (it.isNotEmpty()) Log.i(TAG, "pruned recordings: ${it.size}") }
+            recorder = if (!settings.recordSession) null else runCatching {
+                com.oops.app.store.SessionRecorder(File(app.filesDir, "recordings"), sessionId,
+                    org.json.JSONObject().put("session_id", sessionId).put("source", kind)
+                        .put("started_at", Instant.now().toString()))
+            }.onFailure { Log.e(TAG, "session recording unavailable", it) }.getOrNull()
             tracker = com.oops.app.notice.NoticeTracker(tracker.agenda)
             _state.update { it.copy(syncStatus = "idle") }
             lastTopicAt = 0; lastTopicCount = 0; lastVoiceAt = -5_000
@@ -243,6 +302,7 @@ object OopsEngine {
             reconnectJob?.cancel()
         }
         src.stop()
+        recorder?.closeAudio() // finals that flush after stop are still appended
         client?.finish() // the server flushes the sentence in progress, then closes
         tickJob?.cancel()
         player.stop()
@@ -269,14 +329,18 @@ object OopsEngine {
             delay(5_000) // allow the final ASR sentence to flush
             if (stoppedSession == sessionId && stoppedTracker === tracker) {
                 val todos = sessionIndex.commitments()
-                stoppedTracker.onStop(nowMs, todos.count { com.oops.app.backend.CommitmentRules.evidence(it.text, Settings.TEAM).owner == null },
+                val pendingOwners = todos.count { u -> submitted.values.none {
+                    it.request.sessionId == stoppedSession && u.id in it.request.draft.evidence.utteranceIds } }
+                stoppedTracker.onStop(nowMs, pendingOwners,
                     todos.count { com.oops.app.backend.CommitmentRules.deadline(it.text) == null }).forEach { publishNotice(it, stoppedSession) }
+                if (pendingOwners > 0) emit(OopsEvent.Toast("$pendingOwners 条负责人待确认"))
                 checkResolutions(nowMs)
                 publishSessionSummary(stoppedSession)
             }
             stoppedSync?.let(::ensureSyncWorker)
         }
         Log.i(TAG, "capture stopped")
+        scheduleUpload(10_000) // after the last finals flush
     }
 
     private fun createAudioSource(kind: String): AudioSource = when (kind) {
@@ -333,6 +397,7 @@ object OopsEngine {
                     if (complete) finishVoiceprintRecording()
                 }
                 ring.append(pcm)
+                recorder?.audio(pcm)
                 // 回听时给 ASR 送静音：外放的原声不会被再转写一遍，连接和时间轴也不断。
                 asr?.sendAudio(if (player.isPlaying) ByteArray(pcm.size) else pcm)
                 level = maxOf((Pcm.rms(pcm) * 5).toFloat().coerceAtMost(1f), level * 0.7f)
@@ -349,6 +414,7 @@ object OopsEngine {
             synchronized(pipeline) {
                 if (source !== owner) return
                 ring.appendSilence(Pcm.msToSamples(missingMs))
+                recorder?.silence(Pcm.msToSamples(missingMs))
                 resetSpeakerPreview()
                 // ASR times are relative to the audio it received, so a gap needs a fresh connection.
                 if (asrDownSinceMs == null) asrDownSinceMs = nowMs - missingMs
@@ -498,6 +564,10 @@ object OopsEngine {
 
                 override fun onFinal(utterance: RawUtterance) = onAsrFinal(session, baseMs, utterance)
 
+                override fun onRaw(payload: String) {
+                    recorder?.takeIf { it.sessionId == session }?.let { r -> runCatching { r.asr(generation, baseMs, payload) } }
+                }
+
                 override fun onClosed(error: String?, fatal: Boolean) = onAsrClosed(generation, error, fatal)
             },
         )
@@ -519,12 +589,13 @@ object OopsEngine {
         val u = synchronized(pipeline) {
             if (session != sessionId) return
             val shifted = raw.shift(baseMs)
-            transcript.add(shifted.startMs, shifted.endMs, shifted.text, shifted.speakerId, shifted.words)
+            transcript.add(shifted.startMs, shifted.endMs, shifted.text, null, shifted.words)
                 .let { added -> if (api is MockOopsApi) added else
                     transcript.setSpeaker(added.id, added.speaker, speakerState = "pending")!! }
                 .also { sessionIndex.add(session, it) }
         }
         Log.i(TAG, "final ${u.id} [${u.startMs}-${u.endMs}] ${u.text}")
+        recorder?.takeIf { it.sessionId == session }?.let { r -> runCatching { r.final(u) } }
         emit(OopsEvent.Final(u))
         syncUtterance(session, u)
         if (settings.voiceTrigger) OopsCommand.parseVoice(u.text)?.let { command ->
@@ -578,6 +649,7 @@ object OopsEngine {
                             emit(OopsEvent.UtteranceTagged(updated))
                             syncUtterance(session, updated)
                             checkConflict(session, updated)
+                            refreshOwnerHint(session, updated)
                         }
                     }
                 }
@@ -600,7 +672,13 @@ object OopsEngine {
         val hints = summary.commitments.associate { u ->
             val task = submitted.values.filter { it.request.sessionId == summary.sessionId && u.id in it.request.draft.evidence.utteranceIds }
                 .maxByOrNull { if (it.result.status == "created") 2 else if (it.result.status == "pending") 1 else 0 }
-            u.id to JSONObject().put("ownerHint", com.oops.app.backend.CommitmentRules.evidence(u.text, Settings.TEAM).owner ?: JSONObject.NULL)
+            val model = ownerHints[u.id]
+            u.id to JSONObject().put("ownerHint", task?.request?.draft?.who ?: model?.let { com.oops.app.backend.DraftPolicy.prefilledOwner(it) } ?: JSONObject.NULL)
+                .put("suggestedOwner", model?.suggestedOwner ?: model?.who ?: com.oops.app.backend.CommitmentRules.evidence(u.text, Settings.TEAM).owner ?: JSONObject.NULL)
+                .put("ownerConfidence", model?.ownerConfidence ?: JSONObject.NULL).put("tier", model?.tier ?: "C")
+                .put("reason", model?.reason ?: "负责人尚待核对")
+                .put("ownerCandidates", com.oops.app.backend.ApiJson.speakerCandidates(model?.ownerCandidates.orEmpty()))
+                .put("reviewStatus", if (task != null) "confirmed" else "unreviewed")
                 .put("whenRaw", com.oops.app.backend.CommitmentRules.deadline(u.text) ?: JSONObject.NULL)
                 .put("taskStatus", task?.result?.status ?: JSONObject.NULL).put("taskUrl", task?.result?.taskUrl ?: JSONObject.NULL)
         }
@@ -650,7 +728,7 @@ object OopsEngine {
                 .onSuccess { result ->
                     publishSpeakerMatch(session, u, result, when {
                         result == null -> "unsupported"
-                        result.speaker != null || result.usableSegments(u).isNotEmpty() -> "matched"
+                        com.oops.app.backend.namedSpeaker(result.speaker) != null || result.usableSegments(u).any { it.speaker != null } -> "matched"
                         else -> "unconfirmed"
                     })
                 }
@@ -666,17 +744,72 @@ object OopsEngine {
     private fun publishSpeakerMatch(session: String, u: Utterance, result: com.oops.app.backend.SpeakerResult?, status: String) {
         synchronized(pipeline) {
             if (session != sessionId) return
-            val name = result?.speaker ?: u.speaker
+            val name = com.oops.app.backend.namedSpeaker(result?.speaker)
             val segments = result?.usableSegments(u).orEmpty()
             val score = result?.score?.takeIf { it.isFinite() }
             val preview = if (settings.speakerPreview) result?.preview?.forUtterance(u, Settings.TEAM.toSet()) else null
-            sessionIndex.setSpeaker(session, u.id, name, segments, status, score, preview)?.let { syncUtterance(session, it) }
-            transcript.setSpeaker(u.id, name, segments, status, score, preview)?.let {
-                Log.i(TAG, "speaker ${u.id}: $status name=$name score=$score")
-                emit(OopsEvent.SpeakerIdentified(u.id, name, score, segments, status, preview))
+            val hints = if (name != null) emptyList() else result?.candidates.orEmpty()
+                .filter { com.oops.app.backend.namedSpeaker(it.name) != null && it.score.isFinite() }.take(2)
+            val trial = if (segments.isEmpty()) result?.usableTrial(u).orEmpty() else emptyList()
+            sessionIndex.setSpeaker(session, u.id, name, segments, status, score, preview, hints, trial)?.let {
+                syncUtterance(session, it)
+                refreshOwnerHint(session, it)
+            }
+            transcript.setSpeaker(u.id, name, segments, status, score, preview, hints, trial)?.let {
+                Log.i(TAG, "speaker ${u.id}: $status name=$name score=$score hint=${hints.joinToString { "${it.name}:${it.score}" }}" +
+                    " trial=${trial.joinToString("|") { "${if (it.overlap) "多人" else it.speaker ?: "?"}:${it.text.length}" }}")
+                emit(OopsEvent.SpeakerIdentified(u.id, name, score, segments, status, preview, hints, trial))
             }
         }
         publishSessionSummary(session)
+        refreshDraftSuggestions(session, u.id)
+    }
+
+    private fun refreshOwnerHint(session: String, utterance: Utterance) {
+        if (utterance.tag != "commitment") return
+        val epoch = hintEpochs.merge(utterance.id, 1L, Long::plus)!!
+        val client = api
+        val policy = optionalRequests
+        val reservation = policy.tryReserve("owner-hint") ?: return
+        scope.launch {
+            try {
+                val result = policy.request(reservation) { client.draftAction(DraftRequest(session,
+                    listOf(utterance.toCandidate()), sessionIndex.preceding(utterance.id, 4).map { it.toCandidate() })) }
+                if (result != null && session == sessionId && hintEpochs[utterance.id] == epoch) {
+                    ownerHints[utterance.id] = result
+                    publishSessionSummary(session)
+                }
+            } catch (error: CancellationException) { throw error }
+            catch (error: Exception) { Log.w(TAG, "owner hint unavailable: ${error.javaClass.simpleName}") }
+        }.invokeOnCompletion { reservation.close() }
+    }
+
+    private fun refreshDraftSuggestions(session: String, utteranceId: String) {
+        drafts.values.filter { utteranceId in it.evidence.utteranceIds && !submitted.containsKey(it.draftId) }.forEach { draft ->
+            val revision = suggestionEpochs.merge(draft.draftId, draft.modelRevision + 1) { a, b -> maxOf(a + 1, b) }!!
+            val client = api
+            val policy = optionalRequests
+            val reservation = policy.tryReserve("draft-suggestion") ?: return@forEach
+            scope.launch {
+                try {
+                    val chosen = draft.evidence.utteranceIds.mapNotNull(sessionIndex::get)
+                    if (chosen.size != draft.evidence.utteranceIds.size) return@launch
+                    val result = policy.request(reservation) { client.draftAction(DraftRequest(session,
+                        chosen.map { it.toCandidate() }, sessionIndex.neighbors(draft.evidence.utteranceIds, 4, 1)
+                            .filter { it.id !in draft.evidence.utteranceIds }.map { it.toCandidate() })) }
+                    synchronized(pipeline) {
+                        if (result == null || session != sessionId || submitted.containsKey(draft.draftId) ||
+                            suggestionEpochs[draft.draftId] != revision || "confirm:${draft.draftId}" in inFlight) return@synchronized
+                        drafts.computeIfPresent(draft.draftId) { _, current ->
+                            com.oops.app.backend.DraftPolicy.updateModel(current, result, revision).also {
+                                emit(OopsEvent.Json("action.suggestion", com.oops.app.bridge.BridgeJson.draft(it)))
+                            }
+                        }
+                    }
+                } catch (error: CancellationException) { throw error }
+                catch (error: Exception) { Log.w(TAG, "draft suggestion unavailable: ${error.javaClass.simpleName}") }
+            }.invokeOnCompletion { reservation.close() }
+        }
     }
 
     private fun onAsrClosed(generation: Int, error: String?, fatal: Boolean) {
@@ -890,7 +1023,7 @@ object OopsEngine {
                     return@launch
                 }
                 val chosenIds = chosen.map { it.id }.toSet()
-                val context = (pool + sessionIndex.neighbors(chosenIds, before = 4, after = 1))
+                val context = (pool + sessionIndex.neighbors(chosenIds, before = 8, after = 1))
                     .distinctBy { it.id }
                     .filter { it.id !in chosenIds }
                     .sortedBy { it.startMs }
@@ -900,7 +1033,7 @@ object OopsEngine {
                 val draft = ActionDraft(
                     draftId = "d" + UUID.randomUUID().toString().take(8),
                     cardId = cardId,
-                    who = response.who.orEmpty(),
+                    who = com.oops.app.backend.DraftPolicy.prefilledOwner(response).orEmpty(),
                     what = response.what,
                     whenIso = response.whenIso,
                     whenRaw = response.whenRaw,
@@ -912,10 +1045,16 @@ object OopsEngine {
                         clipStartMs = chosen.first().startMs,
                         clipEndMs = chosen.last().endMs,
                     ),
+                    suggestedOwner = response.suggestedOwner ?: response.who,
+                    ownerSource = response.ownerSource, ownerConfidence = response.ownerConfidence,
+                    tier = response.tier, reason = response.reason, ownerCandidates = response.ownerCandidates,
+                    modelRevision = 1, context = response.context,
                 )
                 drafts[draft.draftId] = draft
                 Log.i(TAG, "draft ${draft.draftId}: who=${draft.who} what=${draft.what} when=${draft.whenIso}")
                 emit(OopsEvent.DraftReady(draft))
+                // A speaker answer may have arrived while this extraction request was in flight.
+                chosen.filter { sessionIndex.get(it.id)?.segments != it.segments }.forEach { refreshDraftSuggestions(sessionId, it.id) }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -927,6 +1066,21 @@ object OopsEngine {
     }
 
     /** Only a confirmed draft is written to Feishu. Retries reuse the draft's op_id. */
+    fun recordOwnerFeedback(payload: JSONObject) {
+        val draft = drafts[payload.optString("draftId")] ?: return
+        if (submitted.containsKey(draft.draftId)) return
+        val session = sessionId
+        val selected = payload.optString("selectedOwner").ifBlank { null }
+        val previous = payload.optString("previousOwner").ifBlank { null }
+        val suggestion = payload.optString("modelSuggestion").ifBlank { null }
+        val tier = payload.optString("modelTier", "C").takeIf { it in setOf("A", "B", "C") } ?: "C"
+        val confidence = if (payload.isNull("modelConfidence")) null else payload.optDouble("modelConfidence")
+            .takeIf { it.isFinite() && it in 0.0..1.0 }
+        val revision = payload.optLong("modelRevision", draft.modelRevision)
+        ownerFeedbackJobs.trySend { ownerFeedback.record(session, draft.draftId, draft.evidence.utteranceIds,
+            previous, selected, suggestion, tier, confidence, revision); Unit }
+    }
+
     fun confirmAction(
         draftId: String,
         who: String,
@@ -934,16 +1088,14 @@ object OopsEngine {
         whenIso: String?,
         whenRaw: String?,
         constraint: String?,
+        ownerSelectionSource: String = "user",
     ) {
         val base = drafts[draftId] ?: return fail("action", "这份草稿已失效")
         if (who.isBlank() || what.isBlank()) return fail("action", "请先填写负责人和事项")
         if (!inFlight.add("confirm:$draftId")) return // 防连点
         val existing = submitted[draftId]
         val opId = opIds.getOrPut(draftId) { UUID.randomUUID().toString() }
-        val draft = existing?.request?.draft ?: base.copy(
-            who = who.trim(), what = what.trim(), whenIso = whenIso?.ifBlank { null },
-            whenRaw = whenRaw?.ifBlank { null }, constraint = constraint?.ifBlank { null },
-        )
+        val draft = existing?.request?.draft ?: com.oops.app.backend.DraftPolicy.confirm(base, who, what, whenIso, whenRaw, constraint, ownerSelectionSource)
         val operation = existing ?: ActionOperationStore.Operation(
             ConfirmRequest(opId, sessionId, draft), settings.backendBaseUrl, api.name == "mock",
             ActionResult(opId, ActionResult.PENDING, mock = api.name == "mock"),
@@ -955,6 +1107,7 @@ object OopsEngine {
         }
         submitted[draftId] = operation
         drafts[draftId] = draft
+        ownerFeedbackJobs.trySend { ownerFeedback.confirm(operation.request.sessionId, draftId, operation.request.draft.who) }
         runAction(operation, submit = ActionWorkflow.shouldSubmit(existing?.result))
     }
 
@@ -1446,6 +1599,7 @@ object OopsEngine {
         val speakerChanged = json.has("speakerInfo") && json.getBoolean("speakerInfo") != settings.speakerInfo
         if (json.has("speakerInfo")) settings.speakerInfo = json.getBoolean("speakerInfo")
         if (json.has("speakerPreview")) settings.speakerPreview = json.getBoolean("speakerPreview")
+        if (json.has("recordSession")) settings.recordSession = json.getBoolean("recordSession")
         if (com.oops.app.BuildConfig.DEBUG && json.has("speakerPreviewUrl")) {
             val value = json.getString("speakerPreviewUrl").trim()
             require(value.isEmpty() || value.toUri().host in setOf("127.0.0.1", "localhost") && value.startsWith("http://")) {
@@ -1487,6 +1641,7 @@ object OopsEngine {
                 hasBackendToken = settings.backendToken.isNotBlank(),
                 speakerInfo = settings.speakerInfo,
                 speakerPreviewEnabled = settings.speakerPreview,
+                recordSession = settings.recordSession,
                 source = if (it.capturing) it.source else settings.source,
                 remoteAddress = settings.remoteAddress,
             )

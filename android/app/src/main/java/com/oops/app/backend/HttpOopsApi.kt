@@ -10,7 +10,8 @@ import org.json.JSONObject
 import java.io.IOException
 
 /** The real backend (洪玉麟's service), see docs/api.md. */
-class HttpOopsApi(private val http: OkHttpClient, baseUrl: String, private val token: String = "") : OopsApi {
+class HttpOopsApi(private val http: OkHttpClient, baseUrl: String, private val token: String = "") : OopsApi,
+    com.oops.app.store.RecordingTransport {
     override val name = "http"
     private val base = baseUrl.trim().trimEnd('/')
 
@@ -77,6 +78,33 @@ class HttpOopsApi(private val http: OkHttpClient, baseUrl: String, private val t
     override suspend fun getAction(opId: String) =
         ApiJson.actionResult(call(request("/v1/actions/$opId").get().build()))
 
+    // ---- raw meeting assets (blocking; call off the main thread) ----
+
+    private fun recordingPath(id: String): String {
+        require(id.matches(Regex("[A-Za-z0-9-]{8,80}")))
+        return "/v1/recordings/$id"
+    }
+
+    private fun blocking(request: Request): JSONObject = http.newCall(request).execute().use { response ->
+        val text = response.body.string()
+        val error = runCatching { JSONObject(text).optJSONObject("error") }.getOrNull()
+        if (response.code == 409 && error?.has("received") == true) throw com.oops.app.store.ResumeAt(error.getLong("received"))
+        if (!response.isSuccessful) throw HttpFailure(response.code, "录音上传返回 HTTP ${response.code}：${error?.optString("message") ?: ""}")
+        JSONObject(text)
+    }
+
+    override fun recordingManifest(sessionId: String, body: JSONObject) =
+        blocking(request(recordingPath(sessionId) + "/manifest").post(body.toString().toRequestBody(JSON)).build())
+
+    override fun recordingChunk(sessionId: String, name: String, offset: Long, bytes: ByteArray, sha256: String): Long {
+        require(name in setOf("audio.pcm", "finals.jsonl", "asr.jsonl", "meta.json"))
+        return blocking(request(recordingPath(sessionId) + "/$name?offset=$offset").header("X-Content-SHA256", sha256)
+            .put(bytes.toRequestBody(OCTET)).build()).getLong("received")
+    }
+
+    override fun recordingComplete(sessionId: String) =
+        blocking(request(recordingPath(sessionId) + "/complete").post("{}".toRequestBody(JSON)).build())
+
     private suspend fun post(path: String, body: JSONObject): JSONObject =
         call(request(path).post(body.toString().toRequestBody(JSON)).build())
 
@@ -98,5 +126,6 @@ class HttpOopsApi(private val http: OkHttpClient, baseUrl: String, private val t
 
     private companion object {
         val JSON = "application/json; charset=utf-8".toMediaType()
+        val OCTET = "application/octet-stream".toMediaType()
     }
 }
