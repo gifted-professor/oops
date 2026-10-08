@@ -4,7 +4,7 @@ import unittest
 
 from voiceprint_split import validated_truth, metrics, gates
 from asr_words_probe import summarize, difference_kind
-from local_backend import code_fingerprint, commitment_evidence, resolve_owner
+from local_backend import code_fingerprint, commitment_evidence, resolve_owner, owner_resolution, jev_owner
 
 
 class EvaluationTest(unittest.TestCase):
@@ -26,7 +26,9 @@ class EvaluationTest(unittest.TestCase):
                 return {"choice": "p2", "probabilities": {"p2": 1}}, "test"
         text = "玉麟，你周五之前把方案发我"
         self.assertEqual(("named", "洪玉麟"), commitment_evidence(text))
-        self.assertEqual("洪玉麟", resolve_owner({"utterances": [{"text": text}]}, OwnerJev()))
+        request = {"utterances": [{"text": text}]}
+        self.assertIsNone(resolve_owner(request, OwnerJev()))
+        self.assertEqual("洪玉麟", owner_resolution(request)["suggested_owner"])
         for text in ("春源，你下周一把报告交了", "春源, 你下周一把报告交了", "林春源：你下周一把报告交了"):
             self.assertEqual(("named", "林春源"), commitment_evidence(text), text)
         self.assertEqual(("self", None), commitment_evidence("我周五之前把方案发给你"))
@@ -49,7 +51,8 @@ class EvaluationTest(unittest.TestCase):
             def choice(inner, state, question, criteria):
                 self.assertIn("Lydia", criteria["p0"])
                 return {"choice": "p0", "probabilities": {"p0": 1}}, "test"
-        self.assertEqual("黄丽萍", resolve_owner({"utterances": [{"text": "Lydia，你周五之前把方案发我"}]}, AliasJev()))
+        self.assertEqual(("named", "黄丽萍"), jev_owner(AliasJev(), "Lydia，你周五之前把方案发我", []))
+        self.assertIsNone(resolve_owner({"utterances": [{"text": "Lydia，你周五之前把方案发我"}]}))
 
     def test_truth_requires_real_labels_and_allowed_boundaries(self):
         body = {"manifest_hash": "frozen", "answers": {"u1": self.answer}}
@@ -78,17 +81,21 @@ class EvaluationTest(unittest.TestCase):
         result = metrics([self.case], {"u1": overlap}, pred)
         self.assertEqual(2, result["chars"])
         self.assertEqual(2, result["overlap_chars"])
-        self.assertEqual(1, result["overlap_any_speaker_accuracy"])
+        self.assertEqual(0, result["overlap_any_candidate_accuracy"])
+        # A single speaker is no longer counted as a candidate-set hit.
+        pred["u1"][0]["candidates"] = [{"name": "洪玉麟", "score": .5}]
+        pred["u1"][1]["candidates"] = [{"name": "林春源", "score": .4}]
+        self.assertEqual(1, metrics([self.case], {"u1": overlap}, pred)["overlap_any_candidate_accuracy"])
         self.assertEqual(0, result["change_count"])
         self.assertEqual(1, result["false_change_points"])
 
-    def test_small_owner_sample_requires_zero_errors(self):
+    def test_small_owner_sample_never_enables_strict_ownership(self):
         baseline = {"char_accuracy": .5, "wrong_claim_rate": .04}
         result = {"char_accuracy": .7, "wrong_claim_rate": .04, "chars": 100,
                   "change_count": 3, "change_recall": 1, "short_count": 3, "short_recall": 1, "short_wrong_rate": 0,
                   "self_count": 20, "self_claimed": 20, "self_coverage": 1, "self_accuracy": .95, "self_wrong": 1}
         self.assertEqual((True, False), gates(result, baseline))
-        self.assertEqual((True, True), gates(result | {"self_wrong": 0, "self_accuracy": 1}, baseline))
+        self.assertEqual((True, False), gates(result | {"self_wrong": 0, "self_accuracy": 1}, baseline))
         self.assertEqual((False, False), gates(result | {"wrong_claim_rate": .051}, baseline))
         self.assertEqual((True, False), gates(result | {"self_count": 7, "self_claimed": 7, "self_wrong": 0, "self_accuracy": 1}, baseline))
 

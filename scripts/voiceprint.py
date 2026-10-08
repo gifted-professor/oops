@@ -418,6 +418,7 @@ def main():
     c.add_argument("--split", action="store_true", help="独立句内切点/说话人/承诺人标注，不使用自动聚类作真值")
     s = sub.add_parser("split-prepare", help="冻结分层抽样集（两场完整 ASR 结果，开发/验收分离）")
     s.add_argument("--seed", type=int, default=7)
+    s.add_argument("--count", type=int, default=55)
     v = sub.add_parser("split-eval", help="开发集调参、独立验收三档拆分和负责人；未标注不生成通过配置")
     v.add_argument("--tune", action="store_true", help="仅用开发集扫描并冻结 short 阈值")
     v.add_argument("--accept", type=float, default=.5)
@@ -425,6 +426,23 @@ def main():
     v.add_argument("--no-jev", action="store_true")
     v.add_argument("--jev-env", default=".jev.env")
     v.add_argument("--jev-model", default="jev-latest")
+    for parser in (c, s, v):
+        parser.add_argument("--dataset", default="dji", help="独立题集ID；现场链路应使用新ID")
+        parser.add_argument("--dataset-root", help="独立题集根目录（默认 models/voiceprint）")
+        parser.add_argument("--registry-snapshot", help="验收使用的线上实际声纹快照；不拉取音频")
+    for parser in (c, s):
+        parser.add_argument("--dev-recording", action="append", default=[], help="开发场录音文件名，可重复")
+        parser.add_argument("--holdout-recording", action="append", default=[], help="独立保留场录音文件名，可重复")
+        parser.add_argument("--recordings-root", help="本机 WAV 文件目录")
+        parser.add_argument("--source", default="DJI", help="题集采集链路说明")
+    v.add_argument("--version", help="开发阶段冻结的唯一评估版本")
+    v.add_argument("--holdout-case-count", type=int, help="预先固定的保留句数量；默认现有manifest的完整保留集")
+    v.add_argument("--holdout-recording-count", type=int, help="预先固定的独立保留场次数量")
+    v.add_argument("--holdout-cutoff", help="预先固定的验收截止日期（UTC ISO格式）")
+    v.add_argument("--holdout-self-count", type=int, default=0, help="预先固定的本人承诺样本目标")
+    v.add_argument("--holdout-named-count", type=int, default=0, help="预先固定的点名样本目标")
+    v.add_argument("--a-threshold", type=float, default=.98)
+    v.add_argument("--b-threshold", type=float, default=.5)
     args = p.parse_args()
     if args.cmd in ("split-prepare", "split-eval") or (args.cmd == "spotcheck" and args.split):
         import voiceprint_split
