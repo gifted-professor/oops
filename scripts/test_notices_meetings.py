@@ -51,6 +51,27 @@ def feature_self_test():
 
 class FeatureTest(unittest.TestCase):
     def test_judgements(self): feature_self_test()
+    def test_android_instant_sync_readback_and_retention(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            meetings = Meetings(scratch)
+            today = dt.datetime.now(dt.timezone.utc).strftime('%Y-%m-%dT%H:%M:%S')
+            for fraction in ('', '.123', '.123456', '.123456789'):
+                started = today + fraction + 'Z'
+                body = dict(session_id='android', started_at=started, ended_at=started,
+                            utterances=[utterance()])
+                # Start afresh per Instant precision instead of changing an immutable start.
+                meetings.sync(body); meetings.sync(body)
+                row = meetings.load('android')
+                self.assertEqual(started, row['started_at'])
+                self.assertEqual(started, row['ended_at'])
+                self.assertEqual(1, len(row['utterances']))
+                os.unlink(meetings.path('android'))
+            old = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=31)).strftime('%Y-%m-%dT%H:%M:%S') + '.123456789Z'
+            meetings.sync(dict(body, session_id='old', started_at=old, ended_at=old))
+            meetings.cleanup()
+            self.assertFalse(os.path.exists(meetings.path('old')))
+            with self.assertRaises(ValueError):
+                meetings.sync(dict(body, started_at=today))
     def test_limits_and_invalid_model_probabilities(self):
         topic = dict(kind='topic', agenda=dict(items=[dict(id='a1', title='预算')]), utterances=[utterance()])
         for updates in (dict(utterances=[utterance()] * 41), dict(agenda=dict(items=[dict(id='../x', title='坏编号')])), dict(utterances=[utterance(text='字'*2001)])):

@@ -29,6 +29,20 @@ def text(value, limit=2000):
     return value
 
 
+def timestamp(value):
+    """Read Java Instant timestamps on Python 3.10; keep the stored wire value intact."""
+    value = text(value, 60)
+    normalized = value[:-1] + '+00:00' if value.endswith('Z') else value
+    # Instant may carry nanoseconds; datetime has microsecond precision. Python
+    # 3.10 also requires three or six fractional digits, unlike newer versions.
+    normalized = re.sub(r'\.(\d+)(?=[+-]\d{2}:\d{2}$)',
+                        lambda m: '.' + m[1][:6].ljust(6, '0'), normalized)
+    parsed = dt.datetime.fromisoformat(normalized)
+    if parsed.tzinfo is None:
+        raise ValueError('日期必须含时区')
+    return parsed
+
+
 def candidates(rows, limit=60, chars=12000):
     if not isinstance(rows, list) or len(rows) > limit:
         raise ValueError('原话数量超限')
@@ -157,7 +171,7 @@ class Meetings:
                     continue
                 path = os.path.join(self.dir, name)
                 row = read_json(path)
-                if dt.datetime.fromisoformat(row['started_at']) < cutoff:
+                if timestamp(row['started_at']) < cutoff:
                     os.unlink(path)
 
     def load(self, sid):
@@ -204,9 +218,7 @@ class Meetings:
         started = req.get('started_at')
         for stamp in (started, req.get('ended_at')):
             if stamp is not None:
-                value = dt.datetime.fromisoformat(text(stamp, 60))
-                if value.tzinfo is None:
-                    raise ValueError('日期必须含时区')
+                timestamp(stamp)
         zone = text(req.get('time_zone', 'UTC'), 100); ZoneInfo(zone)
         ag = agenda(req.get('agenda'))
         with self.lock:

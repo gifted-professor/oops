@@ -1,4 +1,4 @@
-# Oops ①–⑥ 本地实现与待上线步骤
+# Oops ①–⑥ 上线记录与验收
 
 本轮范围：本场四类纪要、原话问答与 Oops 口令、议程时间提醒、跑题/结论遗漏、可能冲突、团队会议文字存档与往期问答。⑦个人记忆/个性化、⑧飞书日程授权、⑨录音豆自动起止仍留下一批。正式说话人拆分和 self 负责人闸门保持原有设置。
 
@@ -9,7 +9,7 @@
 1. 手机安装新 APK 会结束当前试用场次；先获得用户确认，并只读记录现有业务后端、音源、远端音频地址和试验开关，联调后恢复。
 2. 香港部署须先确认四位成员均同意会议转写文字、标签、说话人、议程和提醒存到团队服务器；不含音频。服务凭据持有人共享访问，默认保留 30 天。
 
-2026-10-07 用户回复「同意」，授权安装和香港部署，并确认前述四人文字上传。主 App 已安装；香港 SSH 密钥登录被拒绝，仅允许密码登录，当前等待凭据，尚未替换云端源码。
+2026-10-07 用户回复「同意」，授权安装和香港部署，并确认前述四人文字上传。主 App 已安装；用户完成服务商网页登录后，香港部署已完成。当前 healthz 已包含 notices/meetings；最新结果见文末。此前等待凭据的条目保留为历史记录。
 
 ## 具体部署包与检查
 
@@ -51,3 +51,16 @@
 - 香港 SSH 重新尝试仍返回 `Permission denied (password)`；公网 healthz仍只有旧功能，尚未出现 notices/meetings。部署仍等待有效 root SSH 密码或受保护凭据路径，备份/重启/回退尚未执行。
 
 现阶段剩余外部阻碍：香港登录凭据、豆包流式语音资源授权。用户已批准的部署范围仍有效；这两项解除后继续上线和全流程验收，不重复征求范围确认。
+
+
+## 2026-10-07 登录后：香港部署完成
+
+用户在梦云互联完成登录后，SSH 成功连接原香港实例 `103.110.81.78`；继续执行既有安装与上线授权。已部署 `local_backend.py` 与 `meeting_features.py`，服务运行用户仍为 oops，公网入口仍为 `https://giftedprofessor.xyz/oops-meeting`。healthz 实测 notices/meetings=true，Jev、声纹、live Feishu、preview 保持原值。
+
+- 完整源码/受保护环境备份：`/var/backups/oops-meeting/p0-20261008T032526Z`。本地日志 `evidence/p0-1007/hk-deployment.log`。环境、四人映射、声纹数据哈希未变，四人声纹目录回读成功；原官网、desk、模型入口均返回200。未创建飞书任务，未更改代理或鉴权。
+- 香港内部与公网分别通过六个新增接口401/403隔离，以及真实 Jev 合成 sync/upsert/list/open/search/topic/resolution/history-conflict/recall/tag/draft/ended_at/delete/tombstone 检查。独立合成会议已删除。公网日志 `hk-public-verification.log`。
+- 手机自动同步发现真实兼容缺陷：Android `Instant` 输出末尾Z，香港 Python3.10原生fromisoformat拒绝；本机Python新版与使用+00:00的部署样例未覆盖。新增统一日期解析器，兼容Z及纳秒精度，保留存档原始日期字符串；同步与30天清理共用。香港Python3.10运行5项后端测试全部通过，公网纳秒Z时间往返和完整业务检查再通过。修复备份 `/var/backups/oops-meeting/timestamp-20261008T033120Z`，日志 `hk-timestamp-deployment.log`。最终 meeting_features.py SHA256 `09851b23c6921e446c435a465f77b6f4d0cd572fe139a8b088e269496751aefa`。
+- 重新开始手机remote场次后，自动队列已在香港存下当前会议元数据：Java格式开始日期 `2026-10-08T03:31:47.256060Z`，文件0600、oops所有，无音频/preview字段；手机待同步0。证据 `hk-phone-auto-sync.json`、`hk-phone-final.png`。停止手机场次后，结束日期也由手机自动同步成功（`hk-phone-ended-sync.json`）；该空白验收场次随后删除并恢复remote收音。这证明手机自动同步元数据和结束路径，因ASR403而没有真实转写文字，不能替代真人语音全流程验收。
+- 主APK未更换；本轮测试包安装再次被手机取消，因此没有把公网服务合成检查写成测试APK已在香港运行。手机私有设置与上线前快照逐项完全一致，Mac Wireless microphone桥与7790映射保留。
+
+当前外部阻碍仅剩豆包ASR资源授权：HTTP403 `volc.seedasr.sauc.duration requested resource not granted`。这个资源名为官方2.0小时版（[官方模型列表](https://docs.volcengine.com/docs/DoubaoVoice/model-list?lang=en)）；需在对应火山账号核对已授权模型和当前应用/API凭据绑定，不能从服务商服务器登录推断语音授权已恢复。真人口令、误报率、熄屏震动和长会议稳定性仍未验收。同步队列仍不抗进程退出。
