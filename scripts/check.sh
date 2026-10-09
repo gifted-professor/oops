@@ -34,6 +34,7 @@ python3 scripts/test_filler_report.py
 python3 scripts/test_jev_budget.py
 python3 scripts/test_meetings_overview.py
 python3 scripts/test_label_meeting.py
+python3 scripts/test_review_truth.py
 VOICE_PYTHON=${OOPS_VOICE_PYTHON:-"$ROOT/.venv-voice/bin/python"}
 if [ ! -x "$VOICE_PYTHON" ]; then VOICE_PYTHON=python3; fi
 "$VOICE_PYTHON" -m unittest discover -s scripts -p 'test_speaker_validation.py'

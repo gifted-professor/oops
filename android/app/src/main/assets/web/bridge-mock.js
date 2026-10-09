@@ -124,7 +124,15 @@
     actions.set(opId, r);emit('action.result', r);
   }
   let mockMeetings = [{session_id: 'demo', started_at: '2026-10-06T09:00:00+08:00', goal: '上线方案评审（模拟）', utterance_count: 1}];
-  const historicalRows = [{id: 'u1', text: '预算不能超过10万。', start_ms: 0, end_ms: 4482, tag: 'constraint', speaker: null}];
+  const historicalRows = [{id: 'u1', text: '预算不能超过10万。', start_ms: 0, end_ms: 4482, tag: 'constraint', speaker: null},
+    {id: 'u2', text: '那我周五前把新方案发你。', start_ms: 17162, end_ms: 20181, tag: 'commitment', speaker: null, owner_hint: null, when_raw: '周五前'},
+    {id: 'u3', text: '这个想法不错，不过方案A要时上线，大概要13万。', start_ms: 11442, end_ms: 16841, tag: 'decision', speaker: '林春源'}]
+    .sort((a, b) => a.start_ms - b.start_ms);
+  // Same order as the server's review_queue: tasks, decisions, then unknown speakers of long enough lines.
+  const reviewQueue = (rows) => [
+    ...rows.filter((u) => u.tag === 'commitment' && !u.review?.verdict).map((u) => ({kind: 'commitment', id: u.id})),
+    ...rows.filter((u) => u.tag === 'decision' && !u.review?.verdict).map((u) => ({kind: 'decision', id: u.id})),
+    ...rows.filter((u) => !u.speaker && !u.review?.speaker && u.text.replace(/[^\p{L}\p{N}]/gu, '').length >= 4).map((u) => ({kind: 'speaker', id: u.id}))];
   function handle(type, p) {
     switch (type) {
       case 'hello': queueMicrotask(() => emit('snapshot', { state, transcript, summary: summary(), team, insets: { top: 0, bottom: 0 } }));break;
@@ -145,10 +153,17 @@
         const rows = sessionTranscript.filter(u => p.ids.includes(u.id));
         const card = {id: id('c'), trigger: 'conflict', single: rows.length === 1, engine: 'browser-mock', latencyMs: 0, items: rows.map(u => ({...u, prob: 1})), pool: rows}; cards.set(card.id, card); emit('recall.card', card); break;
       }
-      case 'history.list': emit('history.list', {count: mockMeetings.length, items: mockMeetings}); break;
+      case 'history.list': emit('history.list', {count: mockMeetings.length, items: mockMeetings.map((m) => ({...m, review_pending: {all: reviewQueue(historicalRows).length}}))}); break;
       case 'history.open': {
+        if (p.sessionId === state.sessionId) {
+          const rows = sessionTranscript.map((u) => ({id: u.id, text: u.text, start_ms: u.startMs, end_ms: u.endMs, tag: u.tag, speaker: u.speaker || null}));
+          return emit('history.open', {session_id: state.sessionId, started_at: new Date().toISOString(), utterances: rows, review_queue: reviewQueue(rows),
+            digest: {constraint: [], commitment: [], decision: [], idea: []}, notices: []});
+        }
         const meeting = mockMeetings.find(i => i.session_id === p.sessionId); if (!meeting) return emit('error', {scope: 'history', message: '会议已删除'});
-        emit('history.open', {...meeting, utterances: historicalRows, digest: {constraint: historicalRows, commitment: [], decision: [], idea: []}, notices: []}); break;
+        emit('history.open', {...meeting, utterances: historicalRows, review_queue: reviewQueue(historicalRows),
+          digest: {constraint: historicalRows.filter(u => u.tag === 'constraint'), commitment: historicalRows.filter(u => u.tag === 'commitment' && u.review?.verdict !== 'rejected'),
+            decision: historicalRows.filter(u => u.tag === 'decision' && u.review?.verdict !== 'rejected'), idea: []}, notices: []}); break;
       }
       case 'history.delete': if (p.confirm) {mockMeetings = mockMeetings.filter(i => i.session_id !== p.sessionId); emit('history.delete', {deleted: true});} break;
       case 'history.search': emit('history.search', {query: p.query, engine: 'browser-mock', items: mockMeetings.length ? historicalRows.map(u => ({...u, id: 'h:demo:'+u.id, session_id: 'demo', started_at: '2026-10-06T09:00:00+08:00', prob: .9})) : []}); break;
@@ -176,8 +191,13 @@
         const u = sessionTranscript.find((x) => x.id === p.utteranceId);
         if (p.sessionId === state.sessionId && u) { u.manualSpeaker = p.speaker; emit('speaker.corrected', { ...p, status: 'local' }); }
         const h = historicalRows.find((x) => x.id === p.utteranceId);
-        if (h) { h.review = p.speaker == null ? undefined : { speaker: p.speaker }; }
+        if (h) { h.review = {...(h.review || {}), speaker: p.speaker}; if (p.speaker == null) delete h.review.speaker; }
         setTimeout(() => emit('speaker.corrected', { ...p, status: 'saved' }), 300); break;
+      }
+      case 'review.set': {
+        const u = historicalRows.find((x) => x.id === p.utteranceId);
+        if (u) u.review = {...(u.review || {}), ...p.fields};
+        setTimeout(() => emit('review.saved', {sessionId: p.sessionId, utteranceId: p.utteranceId, review: u?.review || p.fields}), 200); break;
       }
       case 'tasks.list': {
         if (p.mine && !state.selfName) throw new Error('请先在设置里选择本人');

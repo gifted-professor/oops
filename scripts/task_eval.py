@@ -94,6 +94,8 @@ def main(argv=None):
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     utterances = json.load(open(args.meeting, encoding="utf-8"))["utterances"]
     truth = json.load(open(args.truth, encoding="utf-8"))
+    if truth.get("scope") == "model_candidates_only":
+        print("注意：这份真值来自会后核对，只问过模型标出的句子，召回会偏高；看精确率和负责人即可", file=sys.stderr)
     if args.method == "live":
         import local_backend
         jev = local_backend.load_jev(types.SimpleNamespace(jev_env=os.path.join(ROOT, ".jev.env"), jev_model="jev-latest", no_jev=False))

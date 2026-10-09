@@ -1052,13 +1052,15 @@ object OopsEngine {
         emit(OopsEvent.Latency(recent.takeLast(10), sorted[sorted.size / 2]))
     }
 
-    fun playClip(key: String, startMs: Long, endMs: Long) {
-        val slice = evidenceAudio(startMs, endMs)
-        if (slice == null) {
-            emit(OopsEvent.Clip(key, "expired"))
-            return
+    /** Local audio first; with [session] given, a sentence no longer on the phone is fetched from the server's archive. */
+    fun playClip(key: String, startMs: Long, endMs: Long, session: String? = null) {
+        // Another meeting's timestamps would point into this meeting's audio: only this meeting may play locally.
+        val slice = if (session == null || session == sessionId) evidenceAudio(startMs, endMs) else null
+        when {
+            slice != null -> player.play(key, slice)
+            session != null -> playRemoteClip(key, session, startMs, endMs)
+            else -> emit(OopsEvent.Clip(key, "expired"))
         }
-        player.play(key, slice)
     }
 
     private fun evidenceAudio(startMs: Long, endMs: Long): ByteArray? {
@@ -1718,6 +1720,32 @@ object OopsEngine {
                 }
             } catch (error: CancellationException) { throw error }
             catch (error: Exception) { fail("review", "说话人修改没有保存到服务器：${error.message}") }
+        }
+    }
+
+    /** After-meeting check of one sentence: verdict (confirmed/rejected) and owner; null clears that field. */
+    fun review(session: String, utteranceId: String, fields: JSONObject) {
+        val body = JSONObject().put("session_id", session).put("utterance_id", utteranceId)
+            .put("by", settings.selfName.ifEmpty { JSONObject.NULL })
+        for (key in fields.keys()) {
+            val value = if (fields.isNull(key)) null else fields.getString(key)
+            require(when (key) {
+                "verdict" -> value == null || value in setOf("confirmed", "rejected")
+                "owner" -> value == null || value in Settings.TEAM
+                else -> false
+            }) { "核对内容无效" }
+            body.put(key, value ?: JSONObject.NULL)
+        }
+        require(body.has("verdict") || body.has("owner")) { "没有要保存的核对" }
+        val client = api
+        scope.launch {
+            try {
+                val result = client.reviewMeeting(body)
+                if (result == null) fail("review", "服务器上没有这场会议，核对没有保存")
+                else emit(OopsEvent.Json("review.saved", JSONObject().put("sessionId", session).put("utteranceId", utteranceId)
+                    .put("review", result.opt("review") ?: JSONObject.NULL)))
+            } catch (error: CancellationException) { throw error }
+            catch (error: Exception) { fail("review", "核对没有保存到服务器：${error.message}") }
         }
     }
 

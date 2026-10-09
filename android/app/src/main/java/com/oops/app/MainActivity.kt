@@ -206,11 +206,13 @@ class MainActivity : ComponentActivity() {
                 "history.delete" -> OopsEngine.history("delete", p.getString("sessionId"), p.optBoolean("confirm"))
                 "history.search" -> OopsEngine.history("search", p.getString("query"))
                 "digest.open", "commitment.open" -> OopsEngine.openCommitment(p.getString("utteranceId"))
-                "clip.play" -> OopsEngine.playClip(p.getString("key"), p.getLong("startMs"), p.getLong("endMs"))
+                "clip.play" -> OopsEngine.playClip(p.getString("key"), p.getLong("startMs"), p.getLong("endMs"),
+                    p.optString("sessionId").ifBlank { null })
                 "clip.stop" -> OopsEngine.stopClip()
                 "clip.remote" -> OopsEngine.playRemoteClip(p.getString("key"), p.getString("sessionId"), p.getLong("startMs"), p.getLong("endMs"))
                 "speaker.correct" -> OopsEngine.correctSpeaker(p.getString("sessionId"), p.getString("utteranceId"),
                     if (p.isNull("speaker")) null else p.getString("speaker"))
+                "review.set" -> OopsEngine.review(p.getString("sessionId"), p.getString("utteranceId"), p.getJSONObject("fields"))
                 "tasks.list" -> OopsEngine.tasks(p.optBoolean("mine"), p.optString("status").ifBlank { "open" })
                 "recall.save" -> OopsEngine.saveRecall(
                     p.getString("cardId"), p.getJSONArray("utteranceIds").strings(), p.getLong("startMs"), p.getLong("endMs"),

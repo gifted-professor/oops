@@ -218,6 +218,24 @@ def judge_notice(req, jev, overlap, history=()):
     raise ValueError('提醒类型无效')
 
 
+def review_queue(utterances):
+    """What a person should check after the meeting, most consequential first: tasks, decisions, then unknown speakers."""
+    tasks, decisions, speakers = [], [], []
+    for u in utterances:
+        review = u.get('review', {})
+        if u.get('tag') == 'commitment' and 'verdict' not in review and u.get('task_status') != 'created':
+            tasks.append(u)
+        elif u.get('tag') == 'decision' and 'verdict' not in review:
+            decisions.append(u)
+        # Very short lines ("好的", "嗯") are cheap to skip and rarely matter for who owns what.
+        if not u.get('speaker') and 'speaker' not in review and len(re.sub(r'[\W_]', '', u['text'])) >= 4:
+            speakers.append(u)
+    # Unknown speakers of tasks and decisions first: they decide owners and whose decision it was.
+    speakers.sort(key=lambda u: u.get('tag') not in ('commitment', 'decision'))
+    return ([dict(kind='commitment', id=u['id']) for u in tasks] + [dict(kind='decision', id=u['id']) for u in decisions]
+            + [dict(kind='speaker', id=u['id']) for u in speakers])
+
+
 class Meetings:
     def __init__(self, directory, ops=None, retention_days=None, owner=None, deadline=None, team=()):
         self.dir, self.ops, self.team = directory, ops, tuple(team)
@@ -257,7 +275,9 @@ class Meetings:
             for u in row['utterances']:
                 if u['id'] in reviews:
                     u['review'] = reviews[u['id']]
-            row['digest'] = {tag: [u for u in row['utterances'] if u.get('tag') == tag] for tag in DIGEST}
+            # A sentence a person marked "not a task / not a decision" leaves the digest; the model tag stays for comparison.
+            row['digest'] = {tag: [u for u in row['utterances'] if u.get('tag') == tag and u.get('review', {}).get('verdict') != 'rejected']
+                             for tag in DIGEST}
             row['tasks'] = []
             if self.ops:
                 with self.ops.lock:
@@ -273,6 +293,7 @@ class Meetings:
                 task = next((t for t in row['tasks'] if u['id'] in t['evidence'].get('utterance_ids', [])), None)
                 u['task_status'] = task['status'] if task else None
                 u['task_url'] = (task.get('feishu_task') or {}).get('url') if task else None
+            row['review_queue'] = review_queue(row['utterances'])
             return row
 
     def sync(self, req):
@@ -379,7 +400,9 @@ class Meetings:
             rows.sort(key=lambda r: r['started_at'], reverse=True)
             return dict(count=len(rows), items=[dict(session_id=r['session_id'], started_at=r['started_at'],
                 ended_at=r.get('ended_at'), goal=(r.get('agenda') or {}).get('goal', ''),
-                utterance_count=len(r['utterances']), digest_counts={t: len(r['digest'][t]) for t in DIGEST}) for r in rows[:limit]])
+                utterance_count=len(r['utterances']), digest_counts={t: len(r['digest'][t]) for t in DIGEST},
+                review_pending={k: sum(q['kind'] == k for q in r['review_queue']) for k in ('commitment', 'decision', 'speaker')})
+                for r in rows[:limit]])
 
     def delete(self, req):
         if req.get('confirm') is not True:
@@ -400,7 +423,7 @@ class Meetings:
             for s in sessions:
                 row = self.load(s['session_id'])
                 for u in row['utterances']:
-                    if u.get('tag') in ('decision', 'constraint'):
+                    if u.get('tag') in ('decision', 'constraint') and u.get('review', {}).get('verdict') != 'rejected':
                         pool.append(dict(u, id=f"h:{s['session_id']}:{u['id']}", session_id=s['session_id'], started_at=s['started_at']))
             return sorted((u for u in pool if overlap(query, u['text']) > 0),
                           key=lambda u: -overlap(query, u['text']))[:10]

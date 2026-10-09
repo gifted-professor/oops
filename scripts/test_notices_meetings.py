@@ -296,6 +296,35 @@ class FeatureTest(unittest.TestCase):
             finally:
                 local_backend.run_lark = original
 
+    def test_review_queue_order_and_rejected_items_leave_digest_and_history(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            ops = Operations(os.path.join(scratch, 'operations'))
+            m = Meetings(os.path.join(scratch, 'meetings'), ops, team=TEAM)
+            rows = [dict(utterance('u1', '我们决定下周上线这个版本。', 'decision'), speaker=TEAM[0]),
+                    dict(utterance('u2', '我明天把方案发给大家。', 'commitment'), speaker=None),
+                    dict(utterance('u3', '好的', None), speaker=None),
+                    dict(utterance('u4', '这个颜色我觉得还可以再调。', 'idea'), speaker=None),
+                    dict(utterance('u5', '周五前我把预算表整理好。', 'commitment'), speaker=TEAM[1]),
+                    dict(utterance('u6', '预算不能超过十万块钱。', 'constraint'), speaker=TEAM[2])]
+            for n, r in enumerate(rows):
+                r.update(start_ms=n * 1000, end_ms=n * 1000 + 900)
+            m.sync(dict(session_id='s', started_at=dt.datetime.now(dt.timezone.utc).isoformat(), utterances=rows))
+            ops.save(dict(op_id='op-test-555', status='created', request=dict(session_id='s', evidence={'utterance_ids': ['u5']})))
+            queue = m.load('s')['review_queue']
+            # u5 already became a Feishu task; u3 is too short; known speakers are not asked about.
+            self.assertEqual([('commitment', 'u2'), ('decision', 'u1'), ('speaker', 'u2'), ('speaker', 'u4')],
+                             [(q['kind'], q['id']) for q in queue])
+            m.review(dict(session_id='s', utterance_id='u2', verdict='confirmed', owner=TEAM[3], speaker=TEAM[3]))
+            m.review(dict(session_id='s', utterance_id='u1', verdict='rejected'))
+            m.review(dict(session_id='s', utterance_id='u6', verdict='rejected'))
+            row = m.load('s')
+            self.assertEqual([('speaker', 'u4')], [(q['kind'], q['id']) for q in row['review_queue']])
+            self.assertEqual([], row['digest']['decision'])
+            self.assertEqual(['u2', 'u5'], [u['id'] for u in row['digest']['commitment']])
+            self.assertEqual({'commitment': 0, 'decision': 0, 'speaker': 1}, m.listing()['items'][0]['review_pending'])
+            self.assertEqual([], m.historical('next', '预算十万上线', overlap))  # rejected decision and constraint are not history
+
+
 
 def read_raw(meetings, sid):
     with open(meetings.path(sid), encoding='utf-8') as f:
