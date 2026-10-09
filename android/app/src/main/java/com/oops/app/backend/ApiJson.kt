@@ -165,6 +165,17 @@ object ApiJson {
         .put("words", JSONArray(r.words.map(::word)))
         .put("context", JSONArray(r.context.map(::candidate)))
         .put("preview", r.preview).put("clip_end_ms", r.clipEndMs)
+        // The whole-sentence name must not wait for the 4-7 s trial split; it is fetched afterwards.
+        .put("split", "deferred")
+
+    fun splitRequest(sessionId: String, utteranceId: String): JSONObject =
+        JSONObject().put("session_id", sessionId).put("utterance_id", utteranceId)
+
+    fun splitResult(json: JSONObject): SplitFetch = SplitFetch(json.optString("status", "unavailable"),
+        runCatching { readSegments(json.optJSONArray("trial_segments")) }.getOrDefault(emptyList()), timing(json))
+
+    private fun timing(json: JSONObject): Map<String, Long> = json.optJSONObject("timing_ms")?.let { o ->
+        o.keys().asSequence().associateWith { o.optLong(it, -1) }.filterValues { it >= 0 } } ?: emptyMap()
 
     private fun readSegments(segments: JSONArray?): List<SpeakerSegment> =
         (0 until (segments?.length() ?: 0)).map { i ->
@@ -181,7 +192,8 @@ object ApiJson {
             json.optJSONObject("preview")?.let { runCatching { speakerPreview(it) }.getOrNull() },
             json.rawProbability("runner_up")?.takeIf { it.isFinite() },
             readSpeakerCandidates(json.optJSONArray("candidates")),
-            runCatching { readSegments(json.optJSONArray("trial_segments")) }.getOrDefault(emptyList()))
+            runCatching { readSegments(json.optJSONArray("trial_segments")) }.getOrDefault(emptyList()),
+            json.optBoolean("split_pending", false), timing(json))
 
     fun speakerPreview(json: JSONObject): com.oops.app.buffer.SpeakerPreview {
         val activities = json.getJSONArray("activities")

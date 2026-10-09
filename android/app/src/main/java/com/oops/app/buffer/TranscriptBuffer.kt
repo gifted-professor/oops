@@ -75,6 +75,13 @@ class TranscriptBuffer(private val retentionMs: Long) {
     }
 
     @Synchronized
+    fun setTrial(id: String, trialSegments: List<SpeakerSegment>): Utterance? {
+        val index = items.indexOfFirst { it.id == id }
+        if (index < 0) return null
+        return items[index].copy(trialSegments = trialSegments).also { items[index] = it }
+    }
+
+    @Synchronized
     fun setTag(id: String, tag: String, prob: Double?, engine: String): Utterance? {
         if (tag !in ValueTags.ALL) return null
         val index = items.indexOfFirst { it.id == id }

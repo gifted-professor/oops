@@ -29,6 +29,15 @@ interface OopsApi {
     suspend fun identifySpeaker(request: SpeakerRequest): SpeakerResult? = null
     suspend fun tagUtterance(request: TagRequest): TagResult? = null
     suspend fun previewSpeakers(request: SpeakerRequest): com.oops.app.buffer.SpeakerPreview? = null
+
+    /** Late trial split of a sentence whose [SpeakerResult.splitPending] was true; null when unsupported. */
+    suspend fun speakerSplit(sessionId: String, utteranceId: String): SplitFetch? = null
+}
+
+/** `status` is done, pending (still computing; ask again) or unavailable (give up, keep the whole-sentence label). */
+class SplitFetch(val status: String, val trialSegments: List<SpeakerSegment> = emptyList(),
+                 val timingMs: Map<String, Long> = emptyMap()) {
+    fun usableTrial(u: Utterance) = SpeakerResult(null, 0.0, trialSegments = trialSegments).usableTrial(u)
 }
 
 class SpeakerRequest(
@@ -44,7 +53,10 @@ data class SpeakerResult(val speaker: String?, val score: Double, val segments: 
     /** Whole-sentence top-2 voiceprint ranking: display-only suggestions, never identity or owner evidence. */
     val candidates: List<com.oops.app.buffer.SpeakerCandidate> = emptyList(),
     /** Unvalidated split shown as suggestions only; never segments, owner evidence or synced history. */
-    val trialSegments: List<SpeakerSegment> = emptyList()) {
+    val trialSegments: List<SpeakerSegment> = emptyList(),
+    /** The server answered the whole sentence first; the trial split follows via [OopsApi.speakerSplit]. */
+    val splitPending: Boolean = false,
+    val timingMs: Map<String, Long> = emptyMap()) {
     /** Trial parts must still rebuild the exact sentence; otherwise nothing is shown. */
     fun usableTrial(u: Utterance): List<SpeakerSegment> {
         if (trialSegments.size < 2 || trialSegments.joinToString("") { it.text } != u.text) return emptyList()

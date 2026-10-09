@@ -55,6 +55,40 @@ class SpeakerJsonTest {
     }
 
     @Test
+    fun `whole sentence is not held for the split which is fetched afterwards`() {
+        val request = ApiJson.speakerRequest(SpeakerRequest("s1", "u7", ByteArray(4)))
+        assertEquals("deferred", request.getString("split"))
+        val split = ApiJson.splitRequest("s1", "u7")
+        assertEquals("s1", split.getString("session_id"))
+        assertEquals("u7", split.getString("utterance_id"))
+        assertEquals(2, split.length())
+
+        val early = ApiJson.speakerResult(JSONObject("""{"speaker":"林春源","score":0.7,"split_pending":true,
+            "timing_ms":{"identify_ms":420}}"""))
+        assertEquals(true, early.splitPending)
+        assertEquals(mapOf("identify_ms" to 420L), early.timingMs)
+        assertEquals(emptyList<Any>(), early.trialSegments)
+        // An older server answers synchronously: no flag, the split is already in the response.
+        assertEquals(false, ApiJson.speakerResult(JSONObject("""{"speaker":null,"score":0.3}""")).splitPending)
+
+        val buffer = TranscriptBuffer(retentionMs = 60_000)
+        val u = buffer.add(0, 4_000, "我来做。好的。", null)
+        val late = ApiJson.splitResult(JSONObject("""{"status":"done","timing_ms":{"split_ms":3900,"split_queue_ms":10},"trial_segments":[
+            {"start_ms":0,"end_ms":2000,"text":"我来做。","speaker":"林春源","score":0.7,"tier":"B","overlap":false},
+            {"start_ms":2000,"end_ms":4000,"text":"好的。","speaker":"洪玉麟","score":0.6,"tier":"B","overlap":false}]}"""))
+        assertEquals("done", late.status)
+        assertEquals(3900L, late.timingMs["split_ms"])
+        assertEquals(listOf("林春源", "洪玉麟"), late.usableTrial(u).map { it.speaker })
+        assertEquals(emptyList<Any>(), ApiJson.splitResult(JSONObject("""{"status":"pending","trial_segments":[]}""")).usableTrial(u))
+
+        buffer.setSpeaker(u.id, "林春源", speakerState = "matched", speakerScore = 0.7)
+        val withTrial = buffer.setTrial(u.id, late.usableTrial(u))!!
+        assertEquals("林春源", withTrial.speaker) // the late split never rewrites the whole-sentence label
+        assertEquals("matched", withTrial.speakerState)
+        assertEquals(2, withTrial.trialSegments.size)
+    }
+
+    @Test
     fun `task context is parsed for display and a malformed one is dropped`() {
         val ok = ApiJson.draftResponse(JSONObject("""{"what":"把运营选题资料发给对方","tier":"B","suggested_owner":"林春源",
             "assignee_candidates":[],"task_context":{"quote":"那你把那个顺便发我吧","owner_role":"addressee",

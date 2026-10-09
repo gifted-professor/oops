@@ -56,6 +56,9 @@ class HttpOopsApi(private val http: OkHttpClient, baseUrl: String, private val t
     override suspend fun identifySpeaker(request: SpeakerRequest): SpeakerResult? =
         optional("/v1/speaker", ApiJson.speakerRequest(request))?.let(ApiJson::speakerResult)
 
+    override suspend fun speakerSplit(sessionId: String, utteranceId: String): SplitFetch? =
+        optional("/v1/speaker/split", ApiJson.splitRequest(sessionId, utteranceId))?.let(ApiJson::splitResult)
+
     override suspend fun tagUtterance(request: TagRequest): TagResult? =
         optional("/v1/utterances", ApiJson.tagRequest(request))?.let(ApiJson::tagResult)
 
@@ -97,7 +100,7 @@ class HttpOopsApi(private val http: OkHttpClient, baseUrl: String, private val t
         blocking(request(recordingPath(sessionId) + "/manifest").post(body.toString().toRequestBody(JSON)).build())
 
     override fun recordingChunk(sessionId: String, name: String, offset: Long, bytes: ByteArray, sha256: String): Long {
-        require(name in setOf("audio.pcm", "finals.jsonl", "asr.jsonl", "meta.json"))
+        require(name in setOf("audio.pcm", "finals.jsonl", "asr.jsonl", "timing.jsonl", "meta.json"))
         return blocking(request(recordingPath(sessionId) + "/$name?offset=$offset").header("X-Content-SHA256", sha256)
             .put(bytes.toRequestBody(OCTET)).build()).getLong("received")
     }

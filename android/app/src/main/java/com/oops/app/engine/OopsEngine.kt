@@ -75,6 +75,7 @@ object OopsEngine {
     private const val CLIP_PAD_MS = 500L
     /** Shorter sentences carry too little voice to identify reliably. */
     private const val SPEAKER_MIN_MS = 1_000L
+    private const val SPLIT_POLLS = 3
     private const val TEST_WAV = "test/dialog.wav"
 
     private lateinit var app: Application
@@ -173,6 +174,7 @@ object OopsEngine {
             opIds[draft.draftId] = operation.request.opId
         }
         rebuildApi()
+        watchNetwork()
         updateAssistanceState()
         _state.update {
             it.copy(
@@ -208,7 +210,7 @@ object OopsEngine {
                 for (id in uploader.pending(active())) {
                     _state.update { it.copy(recordingsPending = uploader.pending(active()).size, recordingUpload = "uploading") }
                     if (source != null) break
-                    runCatching { uploader.upload(id) }
+                    runCatching { uploader.upload(id) { source == null } }
                         .onSuccess { if (it) Log.i(TAG, "recording uploaded: $id") }
                         .onFailure { Log.w(TAG, "recording upload $id failed: ${it.message}") }
                 }
@@ -246,7 +248,7 @@ object OopsEngine {
                         .put("started_at", Instant.now().toString()))
             }.onFailure { Log.e(TAG, "session recording unavailable", it) }.getOrNull()
             tracker = com.oops.app.notice.NoticeTracker(tracker.agenda)
-            _state.update { it.copy(syncStatus = "idle") }
+            _state.update { it.copy(syncStatus = "idle", recordingCapped = false, micBusy = false) }
             lastTopicAt = 0; lastTopicCount = 0; lastVoiceAt = -5_000
             topicEvidence.clear(); conflictPairs.clear()
             syncContext = SyncContext(com.oops.app.backend.MeetingSync(sessionId, Instant.now().toString(), java.time.ZoneId.systemDefault().id), api)
@@ -397,7 +399,10 @@ object OopsEngine {
                     if (complete) finishVoiceprintRecording()
                 }
                 ring.append(pcm)
-                recorder?.audio(pcm)
+                recorder?.let { r ->
+                    r.audio(pcm)
+                    if (r.capped && !_state.value.recordingCapped) _state.update { it.copy(recordingCapped = true) }
+                }
                 // 回听时给 ASR 送静音：外放的原声不会被再转写一遍，连接和时间轴也不断。
                 asr?.sendAudio(if (player.isPlaying) ByteArray(pcm.size) else pcm)
                 level = maxOf((Pcm.rms(pcm) * 5).toFloat().coerceAtMost(1f), level * 0.7f)
@@ -437,6 +442,12 @@ object OopsEngine {
                 if (source !== owner) return
                 _state.update { it.copy(sourceReady = ready) }
                 if (!ready) _state.update { it.copy(liveSpeakers = emptyList(), liveOverlap = false, liveSpeakerStatus = "waiting") }
+            }
+        }
+
+        override fun onSilenced(silenced: Boolean) {
+            synchronized(pipeline) {
+                if (source === owner && _state.value.micBusy != silenced) _state.update { it.copy(micBusy = silenced) }
             }
         }
 
@@ -595,6 +606,8 @@ object OopsEngine {
                 .also { sessionIndex.add(session, it) }
         }
         Log.i(TAG, "final ${u.id} [${u.startMs}-${u.endMs}] ${u.text}")
+        timing(session, u.id, "final", "final_lag_ms" to synchronized(pipeline) { nowMs - u.endMs },
+            "audio_ms" to (u.endMs - u.startMs))
         recorder?.takeIf { it.sessionId == session }?.let { r -> runCatching { r.final(u) } }
         emit(OopsEvent.Final(u))
         syncUtterance(session, u)
@@ -624,10 +637,15 @@ object OopsEngine {
         val context = sessionIndex.preceding(u.id, 4)
         if (!sessionIndex.beginAnalysis(session, u.id)) { reservation.close(); return }
         publishSessionSummary(session)
+        val queuedAt = SystemClock.elapsedRealtime()
         scope.launch(Dispatchers.IO) {
             try {
                 val request = com.oops.app.backend.TagRequest(session, u.toCandidate(), context.map { it.toCandidate() })
-                val result = policy.request(reservation) { client.tagUtterance(request) }
+                var httpStart = 0L
+                val result = policy.request(reservation) { httpStart = SystemClock.elapsedRealtime(); client.tagUtterance(request) }
+                val done = SystemClock.elapsedRealtime()
+                timing(session, u.id, "tag", "queue_ms" to (httpStart - queuedAt), "http_ms" to (done - httpStart),
+                    "since_final_ms" to (done - queuedAt), "tag" to result?.tag)
                 synchronized(pipeline) {
                     if (session != sessionId) return@synchronized
                     if (result == null) {
@@ -709,6 +727,9 @@ object OopsEngine {
             publishSpeakerMatch(session, u, null, "busy")
             return
         }
+        val queuedAt = SystemClock.elapsedRealtime()
+        var httpStart = 0L
+        var httpDone = 0L
         scope.launch(Dispatchers.IO) {
             runCatching { policy.request(reservation) {
                 // A queued job retains only text/id; PCM is copied only with an execution permit.
@@ -719,7 +740,9 @@ object OopsEngine {
                     ?: throw SpeakerAudioUnavailable()
                 val request = SpeakerRequest(session, u.id, pcm, u.text, u.startMs, u.words,
                     sessionIndex.preceding(u.id, 4).map { it.toCandidate() }, settings.speakerPreview, u.endMs)
+                httpStart = SystemClock.elapsedRealtime()
                 val result = client.identifySpeaker(request)
+                httpDone = SystemClock.elapsedRealtime()
                 if (settings.speakerPreview && result != null && result.preview == null) {
                     val preview = runCatching { previewApi.previewSpeakers(request) }.getOrNull()
                     result.copy(preview = preview)
@@ -731,12 +754,66 @@ object OopsEngine {
                         com.oops.app.backend.namedSpeaker(result.speaker) != null || result.usableSegments(u).any { it.speaker != null } -> "matched"
                         else -> "unconfirmed"
                     })
+                    timing(session, u.id, "speaker", "queue_ms" to (httpStart - queuedAt), "http_ms" to (httpDone - httpStart),
+                        "since_final_ms" to (SystemClock.elapsedRealtime() - queuedAt), "split_pending" to (result?.splitPending == true),
+                        "server" to JSONObject(result?.timingMs.orEmpty()))
+                    if (result?.splitPending == true) fetchSplit(session, u, queuedAt)
                 }
                 .onFailure { error ->
                     Log.w(TAG, "speaker id failed for ${u.id}: ${error.message}")
                     publishSpeakerMatch(session, u, null, if (error is SpeakerAudioUnavailable) "audio_unavailable" else "error")
                 }
         }.invokeOnCompletion { reservation.close() }
+    }
+
+    /**
+     * The server answered the whole sentence first and computes the in-sentence split in the background.
+     * Poll for it (the server holds each request up to 8 s); it only ever adds suggestions to the line.
+     */
+    private fun fetchSplit(session: String, u: Utterance, finalAt: Long) {
+        val client = api
+        val policy = optionalRequests
+        scope.launch(Dispatchers.IO) {
+            try {
+                for (poll in 1..SPLIT_POLLS) {
+                    if (session != sessionId) return@launch
+                    val fetch = policy.request("speaker-split") { client.speakerSplit(session, u.id) } ?: return@launch
+                    if (fetch.status == "pending") continue
+                    val trial = if (fetch.status == "done") fetch.usableTrial(u) else emptyList()
+                    timing(session, u.id, "split", "status" to fetch.status, "polls" to poll, "parts" to trial.size,
+                        "since_final_ms" to (SystemClock.elapsedRealtime() - finalAt), "server" to JSONObject(fetch.timingMs))
+                    if (trial.isNotEmpty()) publishSplit(session, u, trial)
+                    return@launch
+                }
+                timing(session, u.id, "split", "status" to "gave_up", "since_final_ms" to (SystemClock.elapsedRealtime() - finalAt))
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                Log.w(TAG, "speaker split unavailable for ${u.id}: ${error.javaClass.simpleName}")
+            }
+        }
+    }
+
+    /** Adds the late split to a line without touching its whole-sentence label; never synced, drafted or an owner. */
+    private fun publishSplit(session: String, u: Utterance, trial: List<com.oops.app.buffer.SpeakerSegment>) {
+        synchronized(pipeline) {
+            if (session != sessionId) return
+            val current = sessionIndex.get(u.id) ?: return
+            if (current.segments.isNotEmpty()) return // validated segments always win over suggestions
+            sessionIndex.setTrial(session, u.id, trial)
+            transcript.setTrial(u.id, trial)?.let { line ->
+                emit(OopsEvent.SpeakerIdentified(line.id, line.speaker, line.speakerScore, line.segments,
+                    line.speakerState ?: "unconfirmed", line.speakerPreview, line.speakerCandidates, trial))
+            }
+        }
+    }
+
+    /** One JSON line per stage and sentence (logcat and the archived `timing.jsonl`): where the time goes after speech. */
+    private fun timing(session: String, id: String, stage: String, vararg fields: Pair<String, Any?>) {
+        val line = JSONObject().put("id", id).put("stage", stage).put("at", System.currentTimeMillis())
+        fields.forEach { (key, value) -> line.put(key, value ?: JSONObject.NULL) }
+        Log.i(TAG, "timing $line")
+        recorder?.takeIf { it.sessionId == session }?.let { r -> runCatching { r.timing(line) } }
     }
 
     private class SpeakerAudioUnavailable : IllegalStateException("声纹音频已过期或尚未完整到达")
@@ -773,8 +850,10 @@ object OopsEngine {
         val reservation = policy.tryReserve("owner-hint") ?: return
         scope.launch {
             try {
+                val hintStart = SystemClock.elapsedRealtime()
                 val result = policy.request(reservation) { client.draftAction(DraftRequest(session,
                     listOf(utterance.toCandidate()), sessionIndex.preceding(utterance.id, 4).map { it.toCandidate() })) }
+                timing(session, utterance.id, "draft", "http_ms" to (SystemClock.elapsedRealtime() - hintStart))
                 if (result != null && session == sessionId && hintEpochs[utterance.id] == epoch) {
                     ownerHints[utterance.id] = result
                     publishSessionSummary(session)
@@ -809,6 +888,27 @@ object OopsEngine {
                 } catch (error: CancellationException) { throw error }
                 catch (error: Exception) { Log.w(TAG, "draft suggestion unavailable: ${error.javaClass.simpleName}") }
             }.invokeOnCompletion { reservation.close() }
+        }
+    }
+
+    /** The backoff (up to 15 s) is for a dead network; once a network is back, reconnect at once. */
+    private fun watchNetwork() {
+        val manager = app.getSystemService(android.net.ConnectivityManager::class.java) ?: return
+        runCatching {
+            manager.registerDefaultNetworkCallback(object : android.net.ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: android.net.Network) = reconnectAsrNow()
+            })
+        }.onFailure { Log.w(TAG, "network watch unavailable: ${it.javaClass.simpleName}") }
+    }
+
+    private fun reconnectAsrNow() {
+        synchronized(pipeline) {
+            // A live or connecting client exists while `asr` is set; it is null only during the backoff wait.
+            if (source == null || asr != null || _state.value.asr == "error") return
+            reconnectJob?.cancel()
+            reconnectAttempt = 0
+            Log.i(TAG, "network available, reconnecting ASR now")
+            openAsrLocked()
         }
     }
 

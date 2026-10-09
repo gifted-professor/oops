@@ -210,16 +210,18 @@
 
     const banner = $('gap-banner');
     const gaps = s.asrGaps || [];
+    // Several conditions can hold at once; show every one rather than the most recent.
+    const warnings = [];
     if (s.asr === 'unconfigured' || s.asr === 'error') {
-      banner.hidden = false;
-      banner.textContent = s.asrDetail || text;
+      warnings.push(s.asrDetail || text);
     } else if (gaps.length) {
       const g = gaps[gaps.length - 1];
-      banner.hidden = false;
-      banner.textContent = `识别中断过 ${gaps.length} 次，最近一次 ${clock(g.fromMs)}–${clock(g.toMs)} 没有转写`;
-    } else {
-      banner.hidden = true;
+      warnings.push(`识别中断过 ${gaps.length} 次，最近一次 ${clock(g.fromMs)}–${clock(g.toMs)} 没有转写`);
     }
+    if (s.capturing && s.micBusy) warnings.push('麦克风被其他应用占用，这段时间没有声音进来');
+    if (s.capturing && s.recordingCapped) warnings.push('录音已达 3 小时上限，之后只保留文字');
+    banner.hidden = !warnings.length;
+    banner.textContent = warnings.join('；');
 
     const capture = $('btn-capture');
     capture.textContent = s.capturing ? '停止收音' : '开始收音';

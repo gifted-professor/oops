@@ -26,7 +26,7 @@ class ResumeAt(val received: Long) : IOException("resume at $received")
 class RecordingUploader(private val dir: File, private val transport: RecordingTransport,
                         private val chunkBytes: Int = 1_000_000) {
     private val names = linkedMapOf("audio.pcm" to "pcm", "finals.jsonl" to "finals.jsonl",
-        "asr.jsonl" to "asr.jsonl", "meta.json" to "json")
+        "asr.jsonl" to "asr.jsonl", "timing.jsonl" to "timing.jsonl", "meta.json" to "json")
 
     fun pending(active: String?): List<String> = dir.listFiles { f -> f.name.endsWith(".pcm") }.orEmpty()
         .map { it.name.removeSuffix(".pcm") }
@@ -40,8 +40,12 @@ class RecordingUploader(private val dir: File, private val transport: RecordingT
         return !marker.isFile || files(id).values.any { it.lastModified() > marker.lastModified() }
     }
 
-    /** Uploads one session; returns true once the server confirmed the whole archive. */
-    fun upload(id: String): Boolean {
+    /**
+     * Uploads one session; returns true once the server confirmed the whole archive. [shouldContinue] is
+     * checked before every chunk so a meeting that starts mid-upload gets the network back at once; the
+     * server keeps what it received and the next pass resumes from there.
+     */
+    fun upload(id: String, shouldContinue: () -> Boolean = { true }): Boolean {
         val files = files(id)
         if ("audio.pcm" !in files) return false
         val declared = files.mapValues { (_, f) -> f.length() to sha256(f) }
@@ -56,6 +60,7 @@ class RecordingUploader(private val dir: File, private val transport: RecordingT
                 val size = declared.getValue(name).first
                 RandomAccessFile(file, "r").use { raf ->
                     while (offset < size) {
+                        if (!shouldContinue()) return false
                         val bytes = ByteArray(minOf(chunkBytes.toLong(), size - offset).toInt())
                         raf.seek(offset)
                         raf.readFully(bytes)

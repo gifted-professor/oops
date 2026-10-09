@@ -51,6 +51,7 @@ class RecordingUploaderTest {
         File(dir, "s0000001.pcm").writeBytes(ByteArray(2_500) { (it % 251).toByte() })
         File(dir, "s0000001.finals.jsonl").writeText("{\"id\":\"u1\",\"text\":\"好\"}\n")
         File(dir, "s0000001.asr.jsonl").writeText("{\"payload\":\"{}\"}\n")
+        File(dir, "s0000001.timing.jsonl").writeText("{\"stage\":\"final\"}\n")
         File(dir, "s0000001.json").writeText("{\"source\":\"mic\"}")
     }
 
@@ -65,8 +66,22 @@ class RecordingUploaderTest {
         server.failAfterChunks = Int.MAX_VALUE
         assertTrue(uploader.upload("s0000001"))
         assertEquals(File(dir, "s0000001.pcm").readBytes().toList(), server.files.getValue("audio.pcm").toList())
-        assertEquals(setOf("audio.pcm", "finals.jsonl", "asr.jsonl", "meta.json"), server.files.keys)
+        assertEquals(setOf("audio.pcm", "finals.jsonl", "asr.jsonl", "timing.jsonl", "meta.json"), server.files.keys)
         assertEquals(emptyList<String>(), uploader.pending(active = null))
+    }
+
+    @Test
+    fun `a meeting that starts mid-upload stops it at once and the next pass resumes`() {
+        val dir = session()
+        val server = FakeServer()
+        val uploader = RecordingUploader(dir, server, chunkBytes = 1_000)
+        var allowed = 1
+        assertFalse(uploader.upload("s0000001") { allowed-- > 0 })
+        assertEquals(1, server.chunks)
+        assertFalse(File(dir, "s0000001.uploaded").exists())
+        assertEquals(listOf("s0000001"), uploader.pending(active = null))
+        assertTrue(uploader.upload("s0000001"))
+        assertEquals(File(dir, "s0000001.pcm").readBytes().toList(), server.files.getValue("audio.pcm").toList())
     }
 
     @Test

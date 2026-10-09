@@ -36,7 +36,7 @@ object BridgeJson {
         .put("hasBackendToken", s.hasBackendToken)
         .put("speakerInfo", s.speakerInfo)
         .put("speakerPreviewEnabled", s.speakerPreviewEnabled).put("recordSession", s.recordSession)
-        .put("recordingsPending", s.recordingsPending).put("recordingUpload", s.recordingUpload).put("liveSpeakerStatus", s.liveSpeakerStatus ?: NULL)
+        .put("recordingsPending", s.recordingsPending).put("recordingUpload", s.recordingUpload).put("recordingCapped", s.recordingCapped).put("micBusy", s.micBusy).put("liveSpeakerStatus", s.liveSpeakerStatus ?: NULL)
         .put("liveSpeakers", JSONArray(s.liveSpeakers)).put("liveOverlap", s.liveOverlap)
         .put("testWavName", s.testWavName)
         .put("sourceDetail", s.sourceDetail ?: NULL)
