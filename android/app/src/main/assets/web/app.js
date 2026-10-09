@@ -66,7 +66,7 @@
     return Number.isNaN(n) ? String(id) : `说话人 ${String.fromCharCode(65 + n)}`;
   };
   const manualLabel = (v) => MANUAL_OTHER[v] || speakerLabel(v);
-  const initial = (name) => (name ? [...String(name)].slice(-2, -1)[0] || String(name)[0] : '?');
+  const initial = (name) => (name ? [...String(name)][0] : '?');
   const formatDate = (iso) => {
     const d = new Date(iso);
     return Number.isNaN(d.getTime()) ? '' : `${d.getMonth() + 1}月${d.getDate()}日 ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
@@ -78,7 +78,12 @@
   const icon = (name, size = 22) => `<img class="icon" alt="" width="${size}" height="${size}" draggable="false" src="icons/${name}.svg">`;
   const meetingName = (m) => m.title || m.display_title || m.goal || '会议';
   const reviewPending = (i) => Object.values(i.review_pending || {}).reduce((a, b) => a + b, 0);
-  const duration = (m) => (m.ended_at ? mmss(new Date(m.ended_at) - new Date(m.started_at)) : '');
+  // Meetings over an hour read 1:23:04, shorter ones 18:24, as in the prototype.
+  const duration = (m) => {
+    if (!m.ended_at) return '';
+    const ms = new Date(m.ended_at) - new Date(m.started_at);
+    return ms >= 3600000 ? `${Math.floor(ms / 3600000)}:${mmss(ms % 3600000)}` : mmss(ms);
+  };
 
   let toastTimer = null;
   function toast(message, bad = false) {
