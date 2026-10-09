@@ -187,6 +187,20 @@ schema 2 验收核对判定代码及依赖、两种模型、校准器、线上�
 
 负责人先区分明确点名/self/未知；点名须有指派关系，“发给某人”不算。self 必须只有一个明确的第一人称承诺，承诺短语完整位于一个非重叠、非近似的 A 段中，且独立 owner 概率及门禁通过。集体承诺、跨段、多个承诺、重叠、近似和未知留空，交由用户选择。模型 A 显示“高可信”，人工核对才显示“已确认”。
 
+### 句内拆分延后返回与 `POST /v1/speaker/split`（2026-10-08）
+
+句内拆分（试验）在服务器上要几秒，整句名字不应等它。请求带 `"split":"deferred"` 时，`/v1/speaker` 只做整句识别就返回，响应加 `"split_pending":true`（句子不足 `OOPS_SPLIT_MIN_MS`，默认 3000 毫秒，则不拆分、不带该字段）；拆分交给服务器后台单线程计算。不带 `split` 的旧请求保持同步行为，响应里直接带 `trial_segments`，所以新旧 App 与新旧服务器可任意搭配。
+
+```json
+POST /v1/speaker/split   {"session_id":"session-example","utterance_id":"u2"}
+→ {"utterance_id":"u2","status":"done|pending|unavailable","trial_segments":[...],
+   "timing_ms":{"split_queue_ms":12,"split_ms":3900}}
+```
+
+不重传音频。服务器最多等 8 秒：算完返回 `done`；仍在算返回 `pending`，App 再问一次（最多 3 次）；从未提交、已被淘汰（最近 256 条）、计算失败或排队超过 16 条返回 `unavailable`，App 保留整句标签。`trial_segments` 与同步模式逐字段相同。App 收到后只更新这一行的拆分字段，不改整句名字，也不同步、不进入负责人判断。
+
+`/v1/speaker` 响应另带 `timing_ms`（`identify_ms`，同步模式还有 `split_ms`）。相同的 `session_id + utterance_id + 音频哈希 + 模式` 重试直接命中服务器缓存，不重新计算。`/v1/utterances` 的响应带 `timing_ms.jev_ms/clause_ms`，`/v1/actions/draft` 带 `timing_ms.deepseek_ms`；这些字段仅供量延迟，App 不依赖。
+
 ## 本场承诺索引
 
 文字、字时间戳、标签和说话人信息在内存中保留至下次开始收音，上限 20,000 句；达到上限移出最早条目并提示。标签为承诺时及时复制原声，最多 50 段且总字节不超过 16 MiB；超过上限淘汰最早原声，文字保留并显示“原声未保留”。回听/保存仅在完整选中范围被 ring 或暂存原声覆盖时取音频，不把缺失的上下文或音频空隙伪装成完整录音。
@@ -281,7 +295,7 @@ App 每场队列绑定开始时的后端；20 秒或累积 30 句发送，同一
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| POST | `/manifest` | `{"files":[{"name","size","sha256"}],"meta":{}}`；`name` ∈ `audio.pcm`（16 kHz 单声道 s16le，会话时间轴，断流补静音）、`finals.jsonl`、`asr.jsonl`、`meta.json`。返回 `{"complete","received":{name:bytes}}`，用于断点续传；清单变化时超出新大小的文件从零重传 |
+| POST | `/manifest` | `{"files":[{"name","size","sha256"}],"meta":{}}`；`name` ∈ `audio.pcm`（16 kHz 单声道 s16le，会话时间轴，断流补静音）、`finals.jsonl`、`asr.jsonl`、`timing.jsonl`（每句各阶段耗时，`scripts/latency_report.py` 汇总；旧版 App 没有）、`meta.json`（含 `audio_ended_at`、`bytes`、`capped`）。返回 `{"complete","received":{name:bytes}}`，用于断点续传；清单变化时超出新大小的文件从零重传 |
 | PUT | `/{name}?offset=N` | 原始字节分块（≤1.1 MB），头 `X-Content-SHA256` 为本块哈希；`offset` 必须等于已收字节，否则 409 并返回 `received` |
 | POST | `/complete` | 逐个整文件复算 SHA-256；不一致的文件删除并 409（`received:0`）；全部一致写 `complete.json` |
 | GET | （无后缀） | 存档状态 |

@@ -269,7 +269,9 @@ def main():
             target.parent.mkdir(parents=True, exist_ok=True)
             stage = target.with_name(target.name + '.attribution-stage')
             shutil.copyfile(release / name, stage)
-            stage.chmod(0o600 if name == VALIDATION else 0o644)
+            # The service runs as `oops`; a root-only 0600 file made the backend log PermissionError on startup.
+            stage.chmod(0o640 if name == VALIDATION else 0o644)
+            if name == VALIDATION: shutil.chown(stage, 'root', 'oops')
             os.replace(stage, target); changed.append(name)
         subprocess.run(['/opt/oops/venv/bin/python', '-m', 'py_compile', *(str(APP / n) for n in SOURCES)], check=True)
         subprocess.run(['systemctl', 'restart', 'oops-backend'], check=True)
@@ -279,6 +281,7 @@ def main():
                 after = request('/healthz', token); break
             except (OSError, RuntimeError): time.sleep(1)
         if not after: raise RuntimeError('Backend did not recover')
+        subprocess.run(['runuser', '-u', 'oops', '--', 'test', '-r', str(APP / VALIDATION)], check=True)
         for key in ('segments_validated', 'strict_a_enabled', 'self_owner_enabled', 'named_owner_enabled'):
             if after.get(key) is not False: raise RuntimeError('Unexpected attribution gate: ' + key)
         for key in ('voiceprint', 'jev', 'feishu', 'meetings', 'notices', 'speaker_preview'):
