@@ -281,6 +281,9 @@ pyannote 3.0 局部编号不作为身份，不跨不连续发言共用声纹判�
 | GET /v1/meetings/{id} | 元数据、按时间排列的 utterances、notices、digest 四类原话、按 operations.request.session_id 关联的 tasks |
 | POST /v1/meetings/search | {query:1–500字} → {items:[id,text,start_ms,end_ms,speaker,tag,session_id,started_at,prob],engine} |
 | POST /v1/meetings/delete | {session_id,confirm:true} → {deleted:true}；重复删除幂等，迟到同步返回 400 |
+| POST /v1/meetings/review | {session_id,utterance_id,speaker?,verdict?,owner?,by?} → {session_id,utterance_id,review}；人工核对，见下 |
+
+**人工核对（2026-10-09）**：`speaker` ∈ 团队成员或 `other`/`multi`/`unclear`，`owner` ∈ 团队成员，`verdict` ∈ `confirmed`/`rejected`；只改请求里出现的字段，传 `null` 清除该字段，全部清空则删除这条核对。核对单独存在会议文件的 `reviews` 里，同步永远不会覆盖；`GET /v1/meetings/{id}` 把它叠加为每句的 `review` 字段，模型的 `speaker` 原样保留以便对比。会议不存在或已删除返回 404。会议进行中改说话人，服务器本场的任务草稿立即改用人工说话人（优先于句内拆分）找负责人；仍然只是"建议"，不越过负责人验收开关。核对时界面会显示模型猜测，所以这些结果不是盲标，只能进开发集，不能当验收集。
 
 句子/提醒按 id upsert；会议上限 20,000 句及 2,000 条提醒。同步字段采用白名单，仅文字、正式标签、说话人、提醒和议程；不保存音频、词时间戳、试验 preview 或额外上传字段。每句最多 2,000 字，编号 `[A-Za-z0-9_-]{1,100}`，开始日期必须含时区且创建后不可更改。历史待办另有 owner_hint/when_raw/task_status/task_url；self 仍不自动填负责人。搜索预选最多 120 句交给 Jev，失败时仅按字面重合找原话。历史打开与搜索在 App 中只读，不回听、不创建任务。
 
@@ -288,6 +291,16 @@ App 每场队列绑定开始时的后端；20 秒或累积 30 句发送，同一
 
 `healthz` 新增 `notices:true/meetings:true`，只表示接口存在，不表示 Jev 中文判断已验收。
 
+
+## 任务列表 `GET /v1/tasks?assignee=<名>&status=open|done|all`（2026-10-09）
+
+列出经确认已在飞书创建的任务，按创建时间倒序。仅 App 全权限凭据。每条含 `op_id、what、who`（飞书里的实际负责人，读不到时用草稿负责人）、`who_drafted、when、quote、utterance_ids、session_id、meeting{started_at,goal}、created_at、url、overdue`，以及 `feishu`：
+
+- `state`：`open`／`done`／`deleted`（飞书里已删除）／`unknown`；另有 `due_ms`、`completed_at_ms`、`assignee`；
+- 状态在有人请求时用 `lark-cli task tasks get` 回读，缓存 5 分钟，不做后台轮询；读取失败时返回上次的结果并标 `stale:true`，从没读到过则为 `unknown`；
+- `status=open` 也包含 `unknown`，避免读不到时任务被悄悄藏起来；dry-run 创建的任务一律 `unknown`。
+
+2026-10-09 在香港服务器实测：Oops 授权账号能回读它创建、指派给他人的任务（创建者不在成员里也可以），删除后返回 `not_found`（1470404）。
 
 ## 原始录音与转写存档 `/v1/recordings/{session_id}`
 
@@ -299,5 +312,6 @@ App 每场队列绑定开始时的后端；20 秒或累积 30 句发送，同一
 | PUT | `/{name}?offset=N` | 原始字节分块（≤1.1 MB），头 `X-Content-SHA256` 为本块哈希；`offset` 必须等于已收字节，否则 409 并返回 `received` |
 | POST | `/complete` | 逐个整文件复算 SHA-256；不一致的文件删除并 409（`received:0`）；全部一致写 `complete.json` |
 | GET | （无后缀） | 存档状态 |
+| GET | `/clip?start_ms=A&end_ms=B` | 截取一段原声，返回 `audio/wav`（16 kHz 单声道），前后各多 300 ms；最长 30 秒。还没有录音 404，这一段还没传到 409，参数无效 400 |
 
 已删除会议的编号返回 410，延迟重试不能重建录音。手机只在 `complete` 成功后写 `<id>.uploaded`，只清理已确认上传且超过 7 天（或超出 2 GB）的本地副本；未上传成功的录音永不自动删除。Mac 每晚 03:30 由 `local.oops.archive-pull` 用 rsync 镜像服务器 `recordings/` 与 `meetings/` 到 `/Volumes/GPFS/Users/a1234/oops-archive`（镜像删除）。

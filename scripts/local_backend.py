@@ -1169,7 +1169,8 @@ class Backend:
         self.people = People(os.path.join(state, "people.json"))
         self.ops = Operations(os.path.join(state, "operations"))
         self.meetings = Meetings(os.path.join(state, "meetings"), self.ops,
-            owner=lambda value: commitment_evidence(value)[1], deadline=lambda value: WHEN.search(value).group(0) if WHEN.search(value) else None)
+            owner=lambda value: commitment_evidence(value)[1], deadline=lambda value: WHEN.search(value).group(0) if WHEN.search(value) else None,
+            team=TEAM)
         self.recordings = Recordings(os.path.join(state, "recordings"), deleted=self.meeting_deleted)
         self.speakers = Speakers(args.speaker_accept, args.speaker_margin, os.path.join(state, "voiceprints.json"))
         self.speaker_preview, self.preview_error = None, None
@@ -1287,8 +1288,9 @@ class Backend:
         except ValueError:
             return False
 
-    def recording_call(self, action, sid, body=None, name=None, offset=None, data=None, sha=None):
+    def recording_call(self, action, sid, body=None, name=None, offset=None, data=None, sha=None, start=None, end=None):
         try:
+            if action == "clip": return self.recordings.clip(sid, start, end)
             if action == "manifest": return self.recordings.manifest(sid, body)
             if action == "chunk": return self.recordings.chunk(sid, name, offset, data, sha)
             if action == "complete": return self.recordings.complete(sid)
@@ -1304,14 +1306,34 @@ class Backend:
                 if getattr(self, 'recordings', None):  # audio goes with its meeting
                     self.recordings.delete(body.get('session_id'))
                 return result
+            if action == 'review':
+                result = self.meetings.review(body)
+                self.remember_review(body)
+                return result
             if action == 'search':
                 try:
                     return self.meetings.search(body.get('query'), self.jev, overlap, jev_recall)
                 except Exception:
                     if not self.jev: raise
                     return self.meetings.search(body.get('query'), None, overlap, jev_recall)
+        except FileNotFoundError:
+            raise ApiError(404, 'NOT_FOUND', '会议不存在或已删除') from None
         except (ValueError, KeyError, TypeError) as error:
             raise ApiError(400, 'BAD_REQUEST', str(error)) from None
+
+    def remember_review(self, body):
+        """A corrected speaker replaces the model's for this meeting's task drafts (still only a suggestion)."""
+        if 'speaker' not in body:
+            return
+        key = (body['session_id'], body['utterance_id'])
+        with self.speaker_state_lock:
+            manual = self._state('manual_speakers')
+            manual.pop(key, None)
+            if body['speaker'] is not None:
+                manual[key] = body['speaker']
+            while len(manual) > 4096:
+                manual.pop(next(iter(manual)))
+        self.remember_names(body['session_id'], [body['speaker']])
 
     def tag(self, req):
         for key in ("session_id", "utterance_id", "text"):
@@ -1478,7 +1500,11 @@ class Backend:
         if offset is None:
             return None
         with self.speaker_state_lock:
-            entry = self._state('trial_evidence').get((session, utterance.get("id")))
+            key = (session, utterance.get("id"))
+            if key in self._state('manual_speakers'):
+                manual = self._state('manual_speakers')[key]
+                return manual if manual in TEAM else None
+            entry = self._state('trial_evidence').get(key)
         if entry and entry["text"] == utterance.get("text"):
             position = 0
             for segment in entry["segments"]:
@@ -1664,6 +1690,75 @@ class Backend:
                 self.start_worker(op_id)  # e.g. the backend restarted mid-creation: resume, same client_token
             return result_of(op)
 
+    TASK_STATE_TTL_S = 300
+
+    def tasks(self, assignee=None, status="all", now=None):
+        """Created Feishu tasks with their current Feishu state; read on request, never polled."""
+        if status not in ("open", "done", "all"):
+            raise ApiError(400, "BAD_REQUEST", "status 只能是 open、done 或 all")
+        if assignee is not None and assignee not in TEAM:
+            raise ApiError(400, "BAD_REQUEST", "负责人不在团队名单里")
+        with self.ops.lock:
+            ops = [self.ops.load(n[:-5]) for n in os.listdir(self.ops.dir) if n.endswith(".json")]
+        ops = [op for op in ops if op and op.get("status") == "created" and (op.get("feishu_task") or {}).get("guid")]
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            states = dict(zip((op["op_id"] for op in ops), pool.map(lambda op: self.feishu_task_state(op["feishu_task"]["guid"]), ops)))
+        now_ms = int((now or time.time()) * 1000)
+        meetings, items = {}, []
+        for op in ops:
+            req = op.get("request") or {}
+            draft, evidence, state = req.get("draft") or {}, req.get("evidence") or {}, states[op["op_id"]]
+            who = state.get("assignee") or draft.get("who")
+            if assignee and who != assignee:
+                continue
+            # An unreadable state is still shown among open tasks rather than silently hidden.
+            if status != "all" and state["state"] != status and not (status == "open" and state["state"] == "unknown"):
+                continue
+            sid = req.get("session_id")
+            if isinstance(sid, str) and sid not in meetings:
+                meetings[sid] = self.meetings.brief(sid)
+            due_ms = state.get("due_ms")
+            items.append({"op_id": op["op_id"], "what": draft.get("what"), "who": who, "who_drafted": draft.get("who"),
+                          "when": draft.get("when"), "quote": evidence.get("quote"),
+                          "utterance_ids": evidence.get("utterance_ids", []), "session_id": sid,
+                          "meeting": meetings.get(sid), "created_at": op.get("created_at"),
+                          "url": op["feishu_task"].get("url"), "feishu": state,
+                          "overdue": state["state"] == "open" and due_ms is not None and due_ms < now_ms})
+        items.sort(key=lambda i: i["created_at"] or "", reverse=True)
+        return {"items": items}
+
+    def feishu_task_state(self, guid):
+        cache = self._state("feishu_task_states")
+        cached = cache.get(guid)
+        if cached and time.monotonic() - cached[0] < self.TASK_STATE_TTL_S:
+            return cached[1]
+        if self.args.feishu == "dry-run" or guid.startswith("dry-run-"):
+            return {"state": "unknown", "reason": "dry-run"}
+        try:
+            task = find_task(run_lark(self.lark, ["task", "tasks", "get", "--params",
+                                                  json.dumps({"task_guid": guid}), "--as", "user"], timeout=8))
+        except LarkError as e:
+            if "1470404" in str(e) or "not_found" in str(e):
+                state = {"state": "deleted"}
+                cache[guid] = (time.monotonic(), state)
+                return state
+            log(f"飞书任务状态读取失败 {guid[:8]}：{e}")
+            return dict(cached[1], stale=True) if cached else {"state": "unknown", "stale": True}
+        except subprocess.TimeoutExpired:
+            return dict(cached[1], stale=True) if cached else {"state": "unknown", "stale": True}
+        task = task or {}
+        done = task.get("status") == "done" or str(task.get("completed_at") or "0") != "0"
+        due = (task.get("due") or {}).get("timestamp")
+        ids = [m.get("id") for m in task.get("members") or [] if m.get("role") == "assignee"]
+        names = {v: k for k, v in ((self.people.data or {}).get("people") or {}).items()}
+        me = (self.people.data or {}).get("self") or {}
+        names.setdefault(me.get("open_id"), me.get("name"))
+        state = {"state": "done" if done else "open", "due_ms": int(due) if due else None,
+                 "completed_at_ms": int(task["completed_at"]) if done and str(task.get("completed_at") or "0") != "0" else None,
+                 "assignee": next((names[i] for i in ids if i in names), None)}
+        cache[guid] = (time.monotonic(), state)
+        return state
+
     def start_worker(self, op_id):
         """Caller holds ops.lock. One creation attempt per op at a time."""
         event = self.ops.running.get(op_id)
@@ -1747,9 +1842,10 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def reply(self, status, value):
-        payload = json.dumps(value, ensure_ascii=False).encode()
+        binary = isinstance(value, bytes)  # only recording clips are not JSON
+        payload = value if binary else json.dumps(value, ensure_ascii=False).encode()
         self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Type", "audio/wav" if binary else "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(payload)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
@@ -1786,6 +1882,18 @@ class Handler(BaseHTTPRequestHandler):
                     value = self.backend.meetings.listing(int(parse_qs(urlsplit(self.path).query).get('limit', ['30'])[0]))
                 except ValueError as error:
                     raise ApiError(400, 'BAD_REQUEST', str(error)) from None
+            elif method == "GET" and re.fullmatch(r"/v1/recordings/[^/]+/clip", urlsplit(self.path).path):
+                query = parse_qs(urlsplit(self.path).query)
+                try:
+                    start, end = (int(query.get(k, [""])[0]) for k in ("start_ms", "end_ms"))
+                except ValueError:
+                    raise ApiError(400, "BAD_REQUEST", "缺少 start_ms 或 end_ms") from None
+                value = self.backend.recording_call("clip", urlsplit(self.path).path.split("/")[3], start=start, end=end)
+                summary = f"clip bytes={len(value)}"
+            elif method == "GET" and urlsplit(self.path).path == "/v1/tasks":
+                query = parse_qs(urlsplit(self.path).query)
+                value = self.backend.tasks(query.get("assignee", [None])[0], query.get("status", ["all"])[0])
+                summary = f"tasks={len(value['items'])}"
             elif method == "GET" and re.fullmatch(r"/v1/recordings/[^/]+", self.path):
                 value = self.backend.recording_call("status", self.path.rsplit("/", 1)[1])
             elif method == "PUT":
@@ -1830,7 +1938,7 @@ class Handler(BaseHTTPRequestHandler):
                     _, _, _, sid, action = self.path.split("/")
                     value = self.backend.recording_call(action, sid, body)
                     summary = f"recording {action} complete={value.get('complete')}"
-                elif self.path in ('/v1/meetings/sync', '/v1/meetings/delete', '/v1/meetings/search'):
+                elif self.path in ('/v1/meetings/sync', '/v1/meetings/delete', '/v1/meetings/search', '/v1/meetings/review'):
                     value = self.backend.meeting_call(self.path.rsplit('/', 1)[1], body)
                 elif self.path == "/v1/recall":
                     value = self.backend.recall(body)
@@ -1874,7 +1982,7 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:  # noqa: BLE001
             status, value = 500, {"error": {"code": "INTERNAL", "message": "本地后端出错"}}
             summary = type(e).__name__
-        if status == 200 and person and not full_access and "people" in value:
+        if status == 200 and person and not full_access and isinstance(value, dict) and "people" in value:
             value = dict(value, person=person, people=[p for p in value["people"] if p["name"] == person])
         try:
             self.reply(status, value)

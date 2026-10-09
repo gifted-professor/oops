@@ -7,15 +7,19 @@ deleted; deleted sessions leave a tombstone so a delayed retry cannot re-create 
 """
 import datetime as dt
 import hashlib
+import io
 import json
 import os
 import re
 import shutil
 import threading
+import wave
 
 FILES = {"audio.pcm": 4_000_000_000, "finals.jsonl": 200_000_000, "asr.jsonl": 1_000_000_000,
          "timing.jsonl": 200_000_000, "meta.json": 100_000}
 CHUNK_LIMIT = 1_100_000
+CLIP_LIMIT_MS, CLIP_PAD_MS = 30_000, 300
+BYTES_PER_MS = 32  # 16 kHz mono s16le; byte 0 of audio.pcm is session time 0
 SESSION = re.compile(r"[A-Za-z0-9-]{8,80}")
 
 
@@ -150,6 +154,31 @@ class Recordings:
         manifest = self._manifest(sid)
         return {"session_id": sid, "complete": False,
                 "received": {name: self._received(folder, name) for name in manifest["files"]}}
+
+    def clip(self, sid, start_ms, end_ms):
+        """WAV of one sentence from the archived audio, for listening back after the phone has moved on."""
+        if any(type(n) is not int for n in (start_ms, end_ms)) or not 0 <= start_ms < end_ms \
+                or end_ms - start_ms > CLIP_LIMIT_MS:
+            raise RecordingError(400, f"片段时间无效或超过 {CLIP_LIMIT_MS // 1000} 秒")
+        path = os.path.join(self.folder(sid), "audio.pcm")
+        with self.lock:
+            if self.deleted(sid) or not os.path.isfile(path):
+                raise RecordingError(404, "服务器上还没有这场会议的录音")
+            size = os.path.getsize(path)
+            if end_ms * BYTES_PER_MS > size:
+                raise RecordingError(409, "录音还没有上传到这一段")
+            first = max(0, start_ms - CLIP_PAD_MS) * BYTES_PER_MS
+            last = min(size - size % 2, (end_ms + CLIP_PAD_MS) * BYTES_PER_MS)
+            with open(path, "rb") as source:
+                source.seek(first)
+                pcm = source.read(last - first)
+        out = io.BytesIO()
+        with wave.open(out, "wb") as target:
+            target.setnchannels(1)
+            target.setsampwidth(2)
+            target.setframerate(16000)
+            target.writeframes(pcm)
+        return out.getvalue()
 
     def delete(self, sid):
         with self.lock:

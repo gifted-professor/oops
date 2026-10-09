@@ -89,5 +89,34 @@ class RecordingsTest(unittest.TestCase):
             self.store.manifest("session-0004", {"files": [{"name": "../x", "size": 1, "sha256": "0" * 64}]})
 
 
+
+    def test_clip_slices_archived_audio_as_wav(self):
+        import io, wave
+        sid = "session-clip"
+        audio = bytes(range(256)) * 250  # 64000 bytes = 2 s
+        files = [{"name": "audio.pcm", "size": len(audio), "sha256": sha(audio)}]
+        with self.assertRaises(RecordingError) as missing:
+            self.store.clip(sid, 0, 500)
+        self.assertEqual(404, missing.exception.status)
+        self.store.manifest(sid, {"files": files})
+        self.upload(sid, audio[:32000], "audio.pcm", step=16000)
+        with self.assertRaises(RecordingError) as partial:
+            self.store.clip(sid, 900, 1500)  # not uploaded that far yet
+        self.assertEqual(409, partial.exception.status)
+        self.upload(sid, audio, "audio.pcm", start=32000, step=16000)
+        with wave.open(io.BytesIO(self.store.clip(sid, 1000, 1500))) as clip:
+            self.assertEqual((1, 2, 16000), (clip.getnchannels(), clip.getsampwidth(), clip.getframerate()))
+            frames = clip.readframes(clip.getnframes())
+        self.assertEqual(audio[700 * 32:1800 * 32], frames)  # 300 ms padding each side
+        with wave.open(io.BytesIO(self.store.clip(sid, 0, 2000))) as clip:
+            self.assertEqual(audio, clip.readframes(clip.getnframes()))  # padding clamps at both ends
+        for start, end in ((500, 500), (-1, 100), (0, 30001), (0.5, 100)):
+            with self.assertRaises(RecordingError):
+                self.store.clip(sid, start, end)
+        self.gone.add(sid)
+        with self.assertRaises(RecordingError):
+            self.store.clip(sid, 0, 500)
+
+
 if __name__ == "__main__":
     unittest.main()

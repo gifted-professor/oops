@@ -13,6 +13,7 @@ import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
 from meeting_features import Meetings, judge_notice, amount_conflict
+import local_backend
 from local_backend import Backend, Handler, Operations, TEAM, overlap, jev_recall
 from voiceprint_invites import issue_invite
 
@@ -148,6 +149,157 @@ class FeatureTest(unittest.TestCase):
                 self.assertEqual(0, request('/v1/meetings')['count'])
             finally:
                 server.shutdown(); server.server_close(); worker.join()
+
+    def test_reviews_survive_sync_and_clear_field_by_field(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            m = Meetings(scratch, team=TEAM)
+            body = dict(session_id='s', started_at=dt.datetime.now(dt.timezone.utc).isoformat(),
+                        utterances=[dict(utterance(tag='decision'), speaker=None)])
+            m.sync(body)
+            m.review(dict(session_id='s', utterance_id='u1', speaker=TEAM[1], by=TEAM[0]))
+            m.review(dict(session_id='s', utterance_id='u1', verdict='confirmed'))
+            m.sync(dict(body, utterances=[dict(utterance(tag='decision'), speaker=TEAM[2])]))  # late model result
+            row = m.load('s')
+            self.assertEqual(TEAM[2], row['utterances'][0]['speaker'])  # model field kept as sent
+            self.assertEqual(TEAM[1], row['utterances'][0]['review']['speaker'])
+            self.assertEqual('confirmed', row['digest']['decision'][0]['review']['verdict'])
+            self.assertNotIn('review', read_raw(m, 's')['utterances'][0])  # overlay is never persisted
+            m.review(dict(session_id='s', utterance_id='u1', speaker=None))
+            self.assertEqual({'verdict'}, set(m.load('s')['utterances'][0]['review']) - {'by', 'at'})
+            m.review(dict(session_id='s', utterance_id='u1', verdict=None))
+            self.assertNotIn('review', m.load('s')['utterances'][0])
+            self.assertEqual({}, read_raw(m, 's')['reviews'])
+            m.review(dict(session_id='s', utterance_id='u1', speaker='multi'))
+            for bad in (dict(speaker='路人甲'), dict(owner='multi'), dict(verdict='maybe'), dict(utterance_id='nope', speaker=TEAM[0]), {}):
+                with self.assertRaises(ValueError):
+                    m.review(dict(dict(session_id='s', utterance_id='u1'), **bad))
+            with self.assertRaises(FileNotFoundError):
+                m.review(dict(session_id='missing', utterance_id='u1', speaker=TEAM[0]))
+            m.delete(dict(session_id='s', confirm=True))
+            with self.assertRaises(FileNotFoundError):
+                m.review(dict(session_id='s', utterance_id='u1', speaker=TEAM[0]))
+
+    def test_review_route_and_manual_speaker_beats_trial_split(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            backend = Backend.__new__(Backend)
+            backend.jev = None
+            backend.speaker_state_lock = threading.RLock()
+            backend.meetings = Meetings(os.path.join(scratch, 'meetings'), team=TEAM)
+            backend.meetings.sync(dict(session_id='s', started_at=dt.datetime.now(dt.timezone.utc).isoformat(),
+                                       utterances=[utterance(text='我明天把方案发出来。', tag='commitment')]))
+            said = dict(id='u1', text='我明天把方案发出来。', speaker=TEAM[0])
+            backend.remember_trial(dict(session_id='s', utterance_id='u1', text=said['text']),
+                                   [dict(text=said['text'], speaker=TEAM[3], overlap=False)])
+            self.assertEqual(TEAM[3], backend.clause_speaker('s', said, 0))
+            class Protected(Handler):
+                api_token = 'test-full-key'
+            Protected.backend = backend
+            server = ThreadingHTTPServer(('127.0.0.1', 0), Protected)
+            worker = threading.Thread(target=server.serve_forever, daemon=True); worker.start()
+            def post(body, token='test-full-key'):
+                req = urllib.request.Request(f'http://127.0.0.1:{server.server_port}/v1/meetings/review',
+                                             data=json.dumps(body).encode(), headers={'Authorization': 'Bearer ' + token})
+                try:
+                    with urllib.request.urlopen(req) as r: return r.status, json.load(r)
+                except urllib.error.HTTPError as e:
+                    result = (e.code, json.load(e)); e.close(); return result
+            try:
+                status, result = post(dict(session_id='s', utterance_id='u1', speaker=TEAM[1]))
+                self.assertEqual(200, status, result)
+                self.assertEqual(TEAM[1], result['review']['speaker'])
+                self.assertEqual(TEAM[1], backend.clause_speaker('s', said, 0))
+                self.assertIn(TEAM[1], backend._state('session_names')['s'])
+                post(dict(session_id='s', utterance_id='u1', speaker='unclear'))
+                self.assertIsNone(backend.clause_speaker('s', said, 0))  # not a person: no owner suggestion
+                post(dict(session_id='s', utterance_id='u1', speaker=None))
+                self.assertEqual(TEAM[3], backend.clause_speaker('s', said, 0))  # cleared: model again
+                self.assertEqual(401, post(dict(session_id='s', utterance_id='u1', speaker=TEAM[1]), 'wrong')[0])
+                self.assertEqual(404, post(dict(session_id='gone', utterance_id='u1', speaker=TEAM[1]))[0])
+                self.assertEqual(400, post(dict(session_id='s', utterance_id='u1', speaker='路人甲'))[0])
+                import hashlib
+                from recordings import Recordings
+                backend.recordings = Recordings(os.path.join(scratch, 'rec'))
+                pcm = b'\x01\x00' * 32000
+                backend.recordings.manifest('session-s', {'files': [{'name': 'audio.pcm', 'size': len(pcm), 'sha256': hashlib.sha256(pcm).hexdigest()}]})
+                backend.recordings.chunk('session-s', 'audio.pcm', 0, pcm, hashlib.sha256(pcm).hexdigest())
+                base = f'http://127.0.0.1:{server.server_port}'
+                auth = {'Authorization': 'Bearer test-full-key'}
+                with urllib.request.urlopen(urllib.request.Request(base + '/v1/recordings/session-s/clip?start_ms=100&end_ms=600', headers=auth)) as r:
+                    self.assertEqual('audio/wav', r.headers['Content-Type'])
+                    self.assertEqual(b'RIFF', r.read(4))
+                for path, code in (('/v1/recordings/session-s/clip?start_ms=x&end_ms=600', 400), ('/v1/recordings/session-s/clip?start_ms=100&end_ms=9000', 409)):
+                    with self.assertRaises(urllib.error.HTTPError) as failed:
+                        urllib.request.urlopen(urllib.request.Request(base + path, headers=auth))
+                    self.assertEqual(code, failed.exception.code); failed.exception.close()
+                with self.assertRaises(urllib.error.HTTPError) as unauthorized:
+                    urllib.request.urlopen(base + '/v1/recordings/session-s/clip?start_ms=100&end_ms=600')
+                self.assertEqual(401, unauthorized.exception.code); unauthorized.exception.close()
+            finally:
+                server.shutdown(); server.server_close(); worker.join()
+
+    def test_tasks_join_feishu_state_and_cache_it(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            backend = Backend.__new__(Backend)
+            backend.args = types.SimpleNamespace(feishu='live')
+            backend.lark = 'lark-cli'
+            backend.people = types.SimpleNamespace(data={'self': {'name': TEAM[3], 'open_id': 'ou_me'},
+                                                         'people': {TEAM[2]: 'ou_hong', TEAM[3]: 'ou_me'}})
+            backend.ops = Operations(os.path.join(scratch, 'operations'))
+            backend.meetings = Meetings(os.path.join(scratch, 'meetings'), backend.ops, team=TEAM)
+            backend.meetings.sync(dict(session_id='s', started_at='2026-10-08T02:00:00+00:00',
+                                       agenda=dict(goal='上线方案', items=[]), utterances=[utterance()]))
+            def op(op_id, who, guid, created):
+                backend.ops.save(dict(op_id=op_id, status='created', created_at=created, feishu_task={'guid': guid, 'url': 'u-' + guid},
+                                      request=dict(session_id='s', draft=dict(who=who, what='发方案'), evidence=dict(quote='原话', utterance_ids=['u1']))))
+            op('op-open-0001', TEAM[2], 'g-open', '2026-10-08T10:00:00+08:00')
+            op('op-done-0001', TEAM[3], 'g-done', '2026-10-08T11:00:00+08:00')
+            op('op-gone-0001', TEAM[2], 'g-gone', '2026-10-08T12:00:00+08:00')
+            op('op-flaky-001', TEAM[0], 'g-flaky', '2026-10-08T13:00:00+08:00')
+            backend.ops.save(dict(op_id='op-failed-001', status='failed', feishu_task=None, request={}))
+            calls = []
+            def fake_lark(lark, args, timeout=20):
+                guid = json.loads(args[args.index('--params') + 1])['task_guid']
+                calls.append(guid)
+                if guid == 'g-gone':
+                    raise local_backend.LarkError('{"subtype": "not_found", "code": 1470404}')
+                if guid == 'g-flaky':
+                    raise local_backend.LarkError('network down')
+                return {'ok': True, 'data': {'task': {'guid': guid, 'summary': '发方案', 'url': 'x',
+                        'status': 'done' if guid == 'g-done' else 'todo',
+                        'completed_at': '1791500000000' if guid == 'g-done' else '0',
+                        'due': {'timestamp': '1791400000000', 'is_all_day': True},
+                        'members': [{'id': 'ou_hong' if guid == 'g-open' else 'ou_me', 'role': 'assignee', 'type': 'user'}]}}}
+            original = local_backend.run_lark
+            local_backend.run_lark = fake_lark
+            try:
+                every = backend.tasks(now=1791450000)
+                self.assertEqual(['op-flaky-001', 'op-gone-0001', 'op-done-0001', 'op-open-0001'], [i['op_id'] for i in every['items']])
+                by_id = {i['op_id']: i for i in every['items']}
+                self.assertEqual('open', by_id['op-open-0001']['feishu']['state'])
+                self.assertTrue(by_id['op-open-0001']['overdue'])
+                self.assertEqual(TEAM[2], by_id['op-open-0001']['who'])
+                self.assertEqual('上线方案', by_id['op-open-0001']['meeting']['goal'])
+                self.assertEqual('done', by_id['op-done-0001']['feishu']['state'])
+                self.assertFalse(by_id['op-done-0001']['overdue'])
+                self.assertEqual('deleted', by_id['op-gone-0001']['feishu']['state'])
+                self.assertEqual({'state': 'unknown', 'stale': True}, by_id['op-flaky-001']['feishu'])
+                self.assertEqual(['op-flaky-001', 'op-open-0001'], [i['op_id'] for i in backend.tasks(status='open')['items']])
+                self.assertEqual(['op-gone-0001', 'op-open-0001'], [i['op_id'] for i in backend.tasks(assignee=TEAM[2])['items']])
+                calls.clear(); backend.tasks()
+                self.assertEqual(['g-flaky'], calls)  # good and deleted states are cached; failures are retried
+                for bad in (dict(status='late'), dict(assignee='路人甲')):
+                    with self.assertRaises(local_backend.ApiError):
+                        backend.tasks(**bad)
+                backend.args.feishu = 'dry-run'
+                backend._state('feishu_task_states').clear()
+                self.assertEqual('unknown', backend.tasks()['items'][0]['feishu']['state'])
+            finally:
+                local_backend.run_lark = original
+
+
+def read_raw(meetings, sid):
+    with open(meetings.path(sid), encoding='utf-8') as f:
+        return json.load(f)
 
 
 if __name__ == '__main__': unittest.main()

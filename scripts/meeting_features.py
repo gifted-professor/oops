@@ -15,6 +15,10 @@ def read_json(path):
 
 ID = re.compile(r'[A-Za-z0-9_-]{1,100}')
 DIGEST = ('decision', 'commitment', 'constraint', 'idea')
+# People's corrections live beside the model's fields, so a late device sync can never overwrite them.
+REVIEW_SPEAKERS = ('other', 'multi', 'unclear')
+VERDICTS = ('confirmed', 'rejected')
+DERIVED = ('owner_hint', 'when_raw', 'task_status', 'task_url', 'review')
 
 
 def identifier(value):
@@ -215,8 +219,8 @@ def judge_notice(req, jev, overlap, history=()):
 
 
 class Meetings:
-    def __init__(self, directory, ops=None, retention_days=None, owner=None, deadline=None):
-        self.dir, self.ops = directory, ops
+    def __init__(self, directory, ops=None, retention_days=None, owner=None, deadline=None, team=()):
+        self.dir, self.ops, self.team = directory, ops, tuple(team)
         self.owner, self.deadline = owner, deadline
         # Meeting text is a long-lived asset: 0 (default) keeps it until a user deletes the meeting.
         self.retention = int(retention_days if retention_days is not None else os.getenv('OOPS_MEETING_RETENTION_DAYS', '0'))
@@ -249,6 +253,10 @@ class Meetings:
             if not os.path.isfile(path):
                 raise FileNotFoundError(sid)
             row = read_json(path)
+            reviews = row.get('reviews', {})
+            for u in row['utterances']:
+                if u['id'] in reviews:
+                    u['review'] = reviews[u['id']]
             row['digest'] = {tag: [u for u in row['utterances'] if u.get('tag') == tag] for tag in DIGEST}
             row['tasks'] = []
             if self.ops:
@@ -306,21 +314,61 @@ class Meetings:
                 row['ended_at'] = req['ended_at']
             row['agenda'] = ag
             for key, updates in (('utterances', rows), ('notices', notices)):
-                merged = {i['id']: {k:v for k,v in i.items() if k not in ('owner_hint','when_raw','task_status','task_url')} for i in row[key]}
+                merged = {i['id']: {k:v for k,v in i.items() if k not in DERIVED} for i in row[key]}
                 merged.update({i['id']: i for i in updates})
                 if len(merged) > (20000 if key == 'utterances' else 2000):
                     raise ValueError('会议容量已满')
                 row[key] = list(merged.values())
             row['utterances'].sort(key=lambda u: (u['start_ms'], u['id']))
-            row['updated_at'] = dt.datetime.now(dt.timezone.utc).isoformat()
-            fd, tmp = tempfile.mkstemp(dir=self.dir, suffix='.tmp')
-            try:
-                with os.fdopen(fd, 'w', encoding='utf-8') as f:
-                    json.dump(row, f, ensure_ascii=False); f.flush(); os.fsync(f.fileno())
-                os.replace(tmp, self.path(sid))
-            finally:
-                if os.path.exists(tmp): os.unlink(tmp)
+            self.write(sid, row)
             return dict(session_id=sid, utterance_count=len(row['utterances']), notice_count=len(row['notices']))
+
+    def write(self, sid, row):
+        row['updated_at'] = dt.datetime.now(dt.timezone.utc).isoformat()
+        fd, tmp = tempfile.mkstemp(dir=self.dir, suffix='.tmp')
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                json.dump(row, f, ensure_ascii=False); f.flush(); os.fsync(f.fileno())
+            os.replace(tmp, self.path(sid))
+        finally:
+            if os.path.exists(tmp): os.unlink(tmp)
+
+    def review(self, req):
+        """Record a person's correction of one sentence. A field set to null clears that correction."""
+        sid, uid = identifier(req.get('session_id')), identifier(req.get('utterance_id'))
+        fields = {k: req[k] for k in ('speaker', 'verdict', 'owner') if k in req}
+        if not fields:
+            raise ValueError('没有要修改的内容')
+        if fields.get('speaker') not in (None, *self.team, *REVIEW_SPEAKERS):
+            raise ValueError('说话人不在团队名单里')
+        if fields.get('owner') not in (None, *self.team):
+            raise ValueError('负责人不在团队名单里')
+        if fields.get('verdict') not in (None, *VERDICTS):
+            raise ValueError('核对结论无效')
+        by = text(req['by'], 60) if req.get('by') else None
+        with self.lock:
+            path = self.path(sid)
+            if os.path.exists(path + '.deleted') or not os.path.isfile(path):
+                raise FileNotFoundError(sid)
+            row = read_json(path)
+            if not any(u['id'] == uid for u in row['utterances']):
+                raise ValueError('会议里没有这句话')
+            reviews = row.setdefault('reviews', {})
+            entry = {k: v for k, v in {**reviews.get(uid, {}), **fields}.items() if v is not None and k in ('speaker', 'verdict', 'owner')}
+            if entry:
+                reviews[uid] = dict(entry, by=by, at=dt.datetime.now(dt.timezone.utc).isoformat(timespec='seconds'))
+            else:
+                reviews.pop(uid, None)
+            self.write(sid, row)
+            return dict(session_id=sid, utterance_id=uid, review=reviews.get(uid))
+
+    def brief(self, sid):
+        """Start time and agenda goal for labelling a task; None when the meeting is gone."""
+        try:
+            row = read_json(self.path(sid))
+        except (OSError, ValueError):
+            return None
+        return dict(session_id=sid, started_at=row.get('started_at'), goal=(row.get('agenda') or {}).get('goal', ''))
 
     def listing(self, limit=30):
         if not 1 <= limit <= 100:
