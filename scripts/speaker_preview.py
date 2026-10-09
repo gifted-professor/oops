@@ -118,8 +118,10 @@ class SpeakerPreview:
             raise ValueError('Unsupported segmentation model metadata')
         self.lock = threading.Lock()
 
-    def activities(self, pcm, start_ms):
+    def activities(self, pcm, start_ms, identify=True):
+        """identify=False skips the per-run voiceprint lookups that only the preview display uses."""
         np = self.np
+        diagnose = self.speakers.diagnose if identify else (lambda _pcm: {})
         samples = np.frombuffer(pcm, dtype='<i2').astype('float32') / 32768
         duration = len(pcm) // 32
         # Boundaries from the center of each window are more reliable than its edges.
@@ -144,7 +146,7 @@ class SpeakerPreview:
             # Crop before lookup; padding and discarded window edges never affect names.
             cropped = [(max(a, keep_from), min(b, keep_to), slots) for a, b, slots in runs
                        if min(b, keep_to) > max(a, keep_from)]
-            for a, b, slots, diagnosis in identify_runs(pcm, cropped, offset, self.speakers.diagnose):
+            for a, b, slots, diagnosis in identify_runs(pcm, cropped, offset, diagnose):
                 kind = 'overlap' if len(slots) > 1 else 'speech' if slots else 'silence'
                 result.append({'start_ms': start_ms + offset + a, 'end_ms': start_ms + offset + b,
                                'kind': kind, 'speaker': diagnosis.get('speaker'), 'score': diagnosis.get('score', 0),

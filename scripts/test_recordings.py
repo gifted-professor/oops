@@ -48,6 +48,16 @@ class RecordingsTest(unittest.TestCase):
         self.assertEqual(0o700, stat.S_IMODE(os.stat(folder).st_mode))
         self.assertEqual(0o600, stat.S_IMODE(os.stat(os.path.join(folder, "audio.pcm")).st_mode))
 
+    def test_timing_log_is_an_archived_file(self):
+        sid, timing = "session-0009", b'{"id":"u1","final_lag_ms":420}\n'
+        files = self.files + [{"name": "timing.jsonl", "size": len(timing), "sha256": sha(timing)}]
+        self.assertIn("timing.jsonl", self.store.manifest(sid, {"files": files})["received"])
+        self.upload(sid, self.audio, "audio.pcm")
+        self.upload(sid, self.finals, "finals.jsonl")
+        self.upload(sid, timing, "timing.jsonl")
+        self.assertTrue(self.store.complete(sid)["complete"])
+        self.assertEqual(timing, open(os.path.join(self.store.folder(sid), "timing.jsonl"), "rb").read())
+
     def test_bad_chunk_bad_file_and_grown_manifest(self):
         sid = "session-0002"
         self.store.manifest(sid, {"files": self.files})

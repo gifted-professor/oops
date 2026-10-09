@@ -198,7 +198,11 @@ def attribute(speakers, pcm, text, words, clip_start_ms, align, viterbi, decide,
     duration = len(pcm) // 32
     stop = clip_start_ms + duration
     units, approx, coverage = align(text, words, clip_start_ms, stop)
-    if approx or not units or "".join(u["text"] for u in units) != text or not activities:
+    if approx or not units or "".join(u["text"] for u in units) != text:
+        return [unknown_segment(text, clip_start_ms, stop)], coverage
+    if callable(activities):  # lazy: the segmentation model only runs once alignment has succeeded
+        activities = activities()
+    if not activities:
         return [unknown_segment(text, clip_start_ms, stop)], coverage
     accept, margin = config.get("accept", speakers.accept), config.get("margin", speakers.margin)
     short_accept, short_margin = config.get("short_accept", accept + .1), config.get("short_margin", margin + .05)

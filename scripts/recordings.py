@@ -13,7 +13,8 @@ import re
 import shutil
 import threading
 
-FILES = {"audio.pcm": 4_000_000_000, "finals.jsonl": 200_000_000, "asr.jsonl": 1_000_000_000, "meta.json": 100_000}
+FILES = {"audio.pcm": 4_000_000_000, "finals.jsonl": 200_000_000, "asr.jsonl": 1_000_000_000,
+         "timing.jsonl": 200_000_000, "meta.json": 100_000}
 CHUNK_LIMIT = 1_100_000
 SESSION = re.compile(r"[A-Za-z0-9-]{8,80}")
 
