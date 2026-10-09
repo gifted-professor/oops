@@ -14,10 +14,13 @@
       <span class="tagline">Never miss what mattered.</span>
     </div>
     <button class="icon-btn" id="btn-ask" aria-label="问答">问</button>
-    <button class="icon-btn" id="btn-tasks" aria-label="任务">任</button>
-    <button class="icon-btn" id="btn-settings" aria-label="调试设置">⚙︎</button>
   </header>
 
+  <div class="view" id="view-session">
+  <div class="seg" id="session-seg" role="tablist" aria-label="本场或往期">
+    <button class="on" data-pane="live" role="tab">本场</button><button data-pane="history" role="tab">往期会议</button>
+  </div>
+  <div class="pane" id="pane-live">
   <section class="status" aria-live="polite">
     <div class="status-row">
       <span class="pill" id="pill"><span class="dot"></span><span id="capture-text">未收音</span></span>
@@ -51,6 +54,17 @@
     <button class="oops-btn" id="btn-oops" aria-label="Oops，找回刚才那句"><span>Oops</span><small>找回刚才那句</small></button>
     <button class="dock-btn" id="btn-saved">已保存 <b id="saved-count">0</b></button>
   </footer>
+  </div>
+  <div class="pane page" id="pane-history" hidden></div>
+  </div>
+  <div class="view page" id="view-tasks" hidden></div>
+  <div class="view page" id="view-me" hidden></div>
+
+  <nav class="tabbar" id="tabbar" aria-label="主导航">
+    <button class="on" data-tab="session"><span class="tab-icon" aria-hidden="true">◉</span>会话</button>
+    <button data-tab="tasks"><span class="tab-icon" aria-hidden="true">✓</span>任务</button>
+    <button data-tab="me"><span class="tab-icon" aria-hidden="true">☺</span>我的</button>
+  </nav>
 
   <div class="backdrop" id="backdrop" hidden></div>
   <section class="sheet" id="sheet" hidden aria-live="polite"></section>

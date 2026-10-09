@@ -38,6 +38,7 @@
     voiceprintDelete: null,
     team: [],
     tasks: { mine: true, status: 'open', items: null },
+    tab: 'session', pane: 'live',
   };
 
   // ---- helpers --------------------------------------------------------------------------
@@ -102,13 +103,17 @@
         break;
       case 'state': setState(p); break;
       case 'notice': showNotice(p); break;
-      case 'history.list': openSheet({kind: 'history', items: p.items || []}); break;
+      case 'history.list':
+        // The 往期 pane shows the list in place; the link inside 已保存 still uses the sheet.
+        if (!S.sheet && S.tab === 'session' && S.pane === 'history') { S.historyItems = p.items || []; renderHistoryPane(); }
+        else openSheet({kind: 'history', items: p.items || []});
+        break;
       case 'history.open': historyOpen(p); break;
-      case 'history.delete': toast('会议文字已删除'); send('history.list'); break;
+      case 'history.delete': toast('会议文字已删除'); if (S.pane === 'history') closeSheet(); send('history.list'); break;
       case 'history.search': historySearch(p); break;
       case 'speaker.corrected': onSpeakerCorrected(p); break;
       case 'review.saved': onReviewSaved(p); break;
-      case 'tasks.list': S.tasks = { ...S.tasks, items: p.items || [] }; if (S.sheet?.kind === 'tasks') renderSheet(); break;
+      case 'tasks.list': S.tasks = { ...S.tasks, items: p.items || [] }; if (S.tab === 'tasks') renderTasks(); break;
       case 'voiceprint.open': openSheet({kind: 'voiceprint'}); break;
       case 'insets': applyInsets(p); break;
       case 'asr.partial':
@@ -245,7 +250,7 @@
     $('agenda-note').textContent = a.tracking === 'unsupported' ? '当前后端仅支持时间提醒' : '';
     $('sync-note').textContent = !s.memorySync ? '会议文字同步已关闭' : s.syncStatus === 'failed' ? '文字同步已停止，请检查服务器或删除状态' : s.syncStatus === 'unsupported' ? '当前后端不支持会议文字同步' : s.sessionId ? `文字同步到团队服务器 · ${s.syncStatus === 'retrying' ? '等待重试 · ' : ''}待同步 ${s.syncPending || 0}` : '';
 
-    if (S.sheet?.kind === 'settings') {
+    if (S.sheet?.kind === 'settings' || S.tab === 'me') {
       const diag = $('diag');
       if (diag) diag.textContent = diagText();
     }
@@ -471,9 +476,10 @@
 
   function openTasks() {
     S.tasks.items = null;
-    openSheet({ kind: 'tasks' });
+    renderTasks();
     if (!S.tasks.mine || S.state.selfName) send('tasks.list', { mine: S.tasks.mine, status: S.tasks.status });
   }
+  function renderTasks() { $('view-tasks').innerHTML = tasksHtml(); }
   const TASK_STATE = { done: '已完成', deleted: '飞书里已删除', unknown: '状态未知' };
   function tasksHtml() {
     const t = S.tasks;
@@ -490,7 +496,7 @@
           ${i.quote ? `<span class="meta">“${esc(i.quote)}”</span>` : ''}
           ${i.meeting ? `<span class="meta">${esc(formatDate(i.meeting.started_at))}${i.meeting.goal ? ' · ' + esc(i.meeting.goal) : ''}</span>` : ''}</span></button>`;
       }).join('') || '<p class="fine">没有符合条件的任务。</p>'}</div>`;
-    return `${sheetHead('任务 · 飞书')}
+    return `<p class="page-title">任务</p>
       <div class="row">${tab('tasks-scope', 'mine', t.mine ? 'mine' : 'all', '我的' + (S.state.selfName ? `（${esc(S.state.selfName)}）` : ''))}${tab('tasks-scope', 'all', t.mine ? 'mine' : 'all', '全部')}</div>
       <div class="row">${tab('tasks-status', 'open', t.status, '未完成')}${tab('tasks-status', 'done', t.status, '已完成')}${tab('tasks-status', 'all', t.status, '全部')}</div>
       ${body}
@@ -582,7 +588,6 @@
       notices: () => sheetHead('提醒记录') + noticeRecordsHtml([...S.notices.values()]),
       speaker: speakerPickHtml,
       historyTranscript: historyTranscriptHtml,
-      tasks: tasksHtml,
       review: reviewHtml,
     }[k];
     $('sheet').innerHTML = html ? html() : '';
@@ -839,14 +844,15 @@
 
   // ---- settings & saved -------------------------------------------------------------------
 
-  function settingsHtml() {
+  function settingsHtml(page = false) {
     const s = S.state;
     const l = S.latency;
     const latency = l && l.recentMs && l.recentMs.length
       ? `中位数 ${(l.medianMs / 1000).toFixed(2)} 秒 · 最近 ${l.recentMs.map((ms) => (ms / 1000).toFixed(1)).join(' / ')} 秒`
       : '还没有召回记录';
-    return `<div class="grabber"></div>
-      <div class="sheet-head"><span class="kicker">调试设置</span><button class="close" data-act="close" aria-label="关闭">✕</button></div>
+    return `${page ? '<p class="page-title">我的</p>' : `<div class="grabber"></div>
+      <div class="sheet-head"><span class="kicker">调试设置</span><button class="close" data-act="close" aria-label="关闭">✕</button></div>`}
+      <label class="field"><span>本人（用于"我的任务"）</span><select id="set-self"><option value="">未选择</option>${S.team.map((n) => `<option ${n === s.selfName ? 'selected' : ''}>${esc(n)}</option>`).join('')}</select></label>
       <button class="btn primary" data-act="vp-open">声纹录入与匹配测试</button>
       <p class="fine">由本人按提示朗读，录入后可以重新测试谁在说话。</p>
       <label class="field"><span>音源（保存后立即切换，保留本场记录）</span>
@@ -858,7 +864,6 @@
       <label class="field"><span>Mac 收音地址（配合 adb reverse 用 127.0.0.1）</span><input id="set-remote" inputmode="url" placeholder="127.0.0.1:7790" value="${esc(s.remoteAddress || '127.0.0.1:7790')}"></label>
       <p class="fine">测试音频：${esc(s.testWavName || '内置合成对话')} · 需要 PCM 16kHz / 单声道 / 16bit WAV</p>
       <div class="row"><button class="chip" data-act="pick-audio">选择测试 WAV</button><button class="chip ghost" data-act="reset-audio">恢复内置音频</button></div>
-      <label class="field"><span>本人（用于"我的任务"）</span><select id="set-self"><option value="">未选择</option>${S.team.map((n) => `<option ${n === s.selfName ? 'selected' : ''}>${esc(n)}</option>`).join('')}</select></label>
       <label class="switch"><span>说「Oops」触发找回/提问</span><input type="checkbox" id="set-voice" ${s.voiceTrigger !== false ? 'checked' : ''}></label>
       <label class="switch"><span>提醒短震动</span><input type="checkbox" id="set-vibrate" ${s.noticeVibrate !== false ? 'checked' : ''}></label>
       <label class="switch"><span>会议文字自动同步</span><input type="checkbox" id="set-sync" ${s.memorySync !== false ? 'checked' : ''}></label>
@@ -871,10 +876,10 @@
       <label class="switch"><span>实时换人拆分与重叠提示（试验）</span><input type="checkbox" id="set-preview" ${s.speakerPreviewEnabled ? 'checked' : ''}></label>
       <label class="switch"><span>保存原始录音与转写（会后自动上传团队服务器，约 1.9 MB/分钟）</span><input type="checkbox" id="set-record" ${s.recordSession ? 'checked' : ''}></label>
       <p class="fine">原始录音：${s.recordingsPending ? `${s.recordingsPending} 场待上传${s.recordingUpload === 'uploading' ? '（上传中）' : ''}` : '全部已上传'}；未上传成功的录音不会被自动清理。</p>
-      <div class="actions two" style="margin-top:16px">
+      ${page ? '<button class="btn primary" data-act="apply-settings" style="margin-top:16px">保存设置</button>' : `<div class="actions two" style="margin-top:16px">
         <button class="btn ghost" data-act="close">取消</button>
         <button class="btn primary" data-act="apply-settings">保存</button>
-      </div>
+      </div>`}
       <p class="section-title" style="margin-top:18px">召回耗时（验收：中位数 ≤ 5 秒）</p>
       <p class="diag">${esc(latency)}</p>
       <p class="section-title" style="margin-top:12px">诊断</p>
@@ -958,7 +963,29 @@
     if ($('set-clear-token').checked) settings.backendToken = '';
     else if ($('set-token').value.trim()) settings.backendToken = $('set-token').value.trim();
     send('settings.set', settings);
-    closeSheet();
+    if (S.tab === 'me' && !S.sheet) toast('设置已保存');
+    else closeSheet();
+  }
+
+  // ---- tabs ---------------------------------------------------------------------------------
+
+  function switchTab(tab) {
+    if (S.sheet) closeSheet();
+    S.tab = tab;
+    document.querySelectorAll('.tabbar [data-tab]').forEach((b) => b.classList.toggle('on', b.dataset.tab === tab));
+    $('view-session').hidden = tab !== 'session';
+    $('view-tasks').hidden = tab !== 'tasks';
+    $('view-me').hidden = tab !== 'me';
+    $('btn-ask').hidden = tab !== 'session';
+    if (tab === 'tasks') openTasks();
+    if (tab === 'me') $('view-me').innerHTML = settingsHtml(true);
+  }
+  function switchPane(pane) {
+    S.pane = pane;
+    document.querySelectorAll('.seg [data-pane]').forEach((b) => b.classList.toggle('on', b.dataset.pane === pane));
+    $('pane-live').hidden = pane !== 'live';
+    $('pane-history').hidden = pane !== 'history';
+    if (pane === 'history') { S.historyItems = null; renderHistoryPane(); send('history.list'); }
   }
 
   function savedHtml() {
@@ -1025,9 +1052,16 @@
     return rows.length ? rows.map(n => `<div class="saved-item"><b>${esc(n.title)}</b><p class="fine">${esc(n.detail)}</p><span class="meta">${clock(n.atMs ?? n.at_ms)}${n.useful === false ? ' · 已反馈不准' : n.useful === true ? ' · 已反馈有用' : ''}${n.dismissed ? ' · 已收起' : ''}</span>${readonly ? '' : noticeButtons(n)}</div>`).join('') : '<p class="fine">暂无提醒</p>';
   }
   const historyTabs = () => `<div class="row"><button class="chip ghost" data-act="saved-list">已保存片段</button><button class="chip" data-act="history-list">往期会议</button></div>`;
+  function renderHistoryPane() {
+    const items = S.historyItems;
+    $('pane-history').innerHTML = items == null ? spinnerHtml('正在读取往期会议…', '团队服务器') :
+      `<div class="cands">${historyRowsHtml(items)}</div>
+      <p class="footnote">团队共享。会议文字与原始录音长期保留在团队服务器，删除会议时一并删除。</p>`;
+  }
+  const historyRowsHtml = (items) => items.map(i => `<button class="cand" data-act="history-open" data-id="${esc(i.session_id)}"><span class="t">${esc(i.goal || '会议')}</span><span class="meta">${esc(formatDate(i.started_at))} · ${i.utterance_count} 句${reviewPending(i) ? ` · <span class="manual-name">待核对 ${reviewPending(i)}</span>` : ''}</span></button>`).join('') || '<p class="fine">还没有同步的会议文字。</p>';
   function historyHtml() {
     return `${sheetHead('往期会议 · 团队文字存档')}${historyTabs()}
-      ${(S.sheet.items || []).map(i => `<button class="cand" data-act="history-open" data-id="${esc(i.session_id)}"><span class="t">${esc(i.goal || '会议')}</span><span class="meta">${esc(formatDate(i.started_at))} · ${i.utterance_count} 句${reviewPending(i) ? ` · <span class="manual-name">待核对 ${reviewPending(i)}</span>` : ''}</span></button>`).join('') || '<p class="fine">还没有同步的会议文字。</p>'}
+      ${historyRowsHtml(S.sheet.items || [])}
       <p class="footnote">团队共享。会议文字与原始录音长期保留在团队服务器，删除会议时一并删除。</p>`;
   }
   function historyOpen(p) {
@@ -1207,8 +1241,13 @@
   $('btn-oops').addEventListener('click', () => send('recall.trigger'));
   $('btn-saved').addEventListener('click', () => send('saved.list'));
   $('btn-commitments').addEventListener('click', () => openSheet({ kind: 'commitments' }));
-  $('btn-settings').addEventListener('click', () => openSheet({ kind: 'settings' }));
-  $('btn-tasks').addEventListener('click', openTasks);
+  $('tabbar').addEventListener('click', (e) => { const b = e.target.closest('[data-tab]'); if (b) switchTab(b.dataset.tab); });
+  $('session-seg').addEventListener('click', (e) => { const b = e.target.closest('[data-pane]'); if (b) switchPane(b.dataset.pane); });
+  // Pages use the same actions as the sheet.
+  ['view-tasks', 'view-me', 'pane-history'].forEach((id) => $(id).addEventListener('click', (e) => {
+    const el = e.target.closest('[data-act]');
+    if (el && !el.disabled) ACTIONS[el.dataset.act]?.(el);
+  }));
   $('lines').addEventListener('click', (e) => {
     const li = e.target.closest('li[data-id]');
     const u = li && S.records.get(li.dataset.id);
