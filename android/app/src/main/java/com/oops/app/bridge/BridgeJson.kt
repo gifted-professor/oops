@@ -55,6 +55,8 @@ object BridgeJson {
         .put("startMs", u.startMs)
         .put("endMs", u.endMs)
         .put("text", u.text)
+        // Shown instead of `text` when different (a phone number joined); fillers are hidden by the page.
+        .put("display", com.oops.app.core.TextClean.display(u.text)).put("filler", com.oops.app.core.TextClean.isFiller(u.text))
         .put("speaker", u.speaker ?: NULL)
         .put("speakerState", u.speakerState ?: NULL).put("speakerScore", u.speakerScore ?: NULL)
         .put("speakerPreview", u.speakerPreview?.let(::preview) ?: NULL)

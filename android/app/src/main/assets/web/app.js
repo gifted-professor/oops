@@ -251,11 +251,13 @@
 
   function addLine(u) {
     if (S.lines.has(u.id)) return;
+    // A lone interjection ('嗯', '呃') carries nothing; it stays in the archive and the sync, just not on screen.
+    if (u.filler) return;
     const li = document.createElement('li');
     li.dataset.id = u.id;
     li.dataset.start = u.startMs;
     const speaker = speakerLabel(u.speaker);
-    li.innerHTML = `<time>${clock(u.startMs)}</time><div>${speaker ? `<span class="spk">${esc(speaker)}</span>` : ''}${esc(u.text)}</div>`;
+    li.innerHTML = `<time>${clock(u.startMs)}</time><div>${speaker ? `<span class="spk">${esc(speaker)}</span>` : ''}${esc(u.display || u.text)}</div>`;
     const list = $('lines');
     // Keep time order: finals may interleave after an ASR reconnect.
     const next = [...list.children].find((el) => Number(el.dataset.start) > u.startMs) || null;
@@ -310,20 +312,22 @@
     const u = S.records.get(id), li = S.lines.get(id);
     if (!u || !li) return;
     const speaker = speakerLabel(u.speaker);
-    const experiment = !u.segments?.length && S.state.speakerPreviewEnabled && u.speakerPreview?.experimental && u.speakerPreview.segments?.length;
+    // A joined phone number no longer matches the segments' text, so such a line is shown whole.
+    const stitched = !!u.display && u.display !== u.text;
+    const experiment = !stitched && !u.segments?.length && S.state.speakerPreviewEnabled && u.speakerPreview?.experimental && u.speakerPreview.segments?.length;
     const words = experiment ? `<span class="preview-note">说话人拆分试验${u.speakerPreview.jevUsed ? ' · Jev 辅助' : ''}</span>` +
       u.speakerPreview.segments.map((s) => `<span class="preview-segment${s.kind === 'overlap' ? ' preview-overlap' : ''}"><span class="spk spk-status">${esc(s.kind === 'overlap' ? '疑似多人同时说话' : speakerLabel(s.speaker) || '身份待确认')}${s.source === 'voiceprint+context' ? ' · 待核对' : ''}</span>${esc(s.text)}</span>`).join('') :
-      u.segments?.length ? u.segments.map((s) => {
+      u.segments?.length && !stitched ? u.segments.map((s) => {
         const status = s.overlap ? '多人同时说' : s.tier === 'A' ? '高可信' : '建议 · 待核对';
         const names = s.overlap ? (s.candidates || []).map(c => c.name).join(' / ') : speakerLabel(s.speaker) || '身份待确认';
         return `<span class="speaker-segment tier-${esc(s.tier || 'C')}${s.approx ? ' approx-segment' : ''}"><span class="spk">${esc(names)} · ${status}</span>${esc(s.text)}</span>`;
       }).join('') :
-      u.trialSegments?.length > 1 ? `<span class="preview-note">按人拆分（试验 · 建议）</span>` + u.trialSegments.map((s) => {
+      u.trialSegments?.length > 1 && !stitched ? `<span class="preview-note">按人拆分（试验 · 建议）</span>` + u.trialSegments.map((s) => {
         const names = s.overlap ? (s.candidates || []).map(c => speakerLabel(c.name)).join(' / ') + ' · 多人同时说'
           : s.speaker ? `${speakerLabel(s.speaker)} · 建议` : trialGuess(s);
         return `<span class="speaker-segment trial-segment${s.overlap ? ' preview-overlap' : ''}"><span class="spk spk-status">${esc(names)}</span>${esc(s.text)}</span>`;
       }).join('') :
-      `${speaker ? `<span class="spk">${esc(speaker)} · 待核对</span>` : ''}${speakerStatusHtml(u)}${esc(u.text)}`;
+      `${speaker ? `<span class="spk">${esc(speaker)} · 待核对</span>` : ''}${speakerStatusHtml(u)}${esc(u.display || u.text)}`;
     li.querySelector('div').innerHTML = `${words}${TAG_LABELS[u.tag] ? ` <span class="badge value-tag">${TAG_LABELS[u.tag]}</span>` : ''}`;
   }
 

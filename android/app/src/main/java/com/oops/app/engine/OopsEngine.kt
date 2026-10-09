@@ -607,7 +607,7 @@ object OopsEngine {
         }
         Log.i(TAG, "final ${u.id} [${u.startMs}-${u.endMs}] ${u.text}")
         timing(session, u.id, "final", "final_lag_ms" to synchronized(pipeline) { nowMs - u.endMs },
-            "audio_ms" to (u.endMs - u.startMs))
+            "audio_ms" to (u.endMs - u.startMs), "filler" to com.oops.app.core.TextClean.isFiller(u.text))
         recorder?.takeIf { it.sessionId == session }?.let { r -> runCatching { r.final(u) } }
         emit(OopsEvent.Final(u))
         syncUtterance(session, u)
@@ -621,8 +621,11 @@ object OopsEngine {
                 }
             }
         }
-        tagUtterance(session, u)
-        identifySpeaker(session, u)
+        // An interjection on its own ('嗯', '呃') is hidden in the transcript and not worth a tag or voiceprint request.
+        if (!com.oops.app.core.TextClean.isFiller(u.text)) {
+            tagUtterance(session, u)
+            identifySpeaker(session, u)
+        }
     }
 
     private fun tagUtterance(session: String, u: Utterance) {
