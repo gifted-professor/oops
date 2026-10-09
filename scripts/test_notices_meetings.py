@@ -10,6 +10,7 @@ import time
 import types
 import unittest
 import urllib.error
+import urllib.parse
 import urllib.request
 from http.server import ThreadingHTTPServer
 from meeting_features import Meetings, judge_notice, amount_conflict
@@ -398,6 +399,66 @@ class FeatureTest(unittest.TestCase):
             self.assertEqual(1, len(seen))  # 7 sentences now: asked again, but the over-long answer is dropped
             self.assertEqual('安卓版本排期', backend.meetings.load('done')['display_title'])
             self.assertFalse(backend.meetings.set_auto_title('done', '旧的', 6, 'm'))  # text changed meanwhile
+
+
+    def test_projects_and_project_scoped_conflicts(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            m = Meetings(scratch, team=TEAM)
+            now = dt.datetime.now(dt.timezone.utc)
+            def meeting(sid, hours_ago, rows):
+                m.sync(dict(session_id=sid, started_at=(now - dt.timedelta(hours=hours_ago)).isoformat(), ended_at=now.isoformat(),
+                            utterances=[dict(utterance(uid, txt, tag), start_ms=i * 1000, end_ms=i * 1000 + 900) for i, (uid, txt, tag) in enumerate(rows)]))
+            meeting('a1', 48, [('u1', '安卓版先上线，苹果版下个月再做。', 'decision'), ('u2', '预算控制在十万以内。', 'constraint'),
+                               ('u3', '我们用红色做主色调。', 'decision')])
+            meeting('a2', 24, [('u1', '登录先只支持手机号。', 'decision')])
+            meeting('b1', 30, [('u1', '官网下周改版。', 'decision')])
+            meeting('now', 0, [('u1', '那就苹果和安卓同时发。', 'decision')])
+            for sid in ('a1', 'a2', 'now'):
+                m.set_project(dict(session_id=sid, project=' 安卓 App '))
+            m.set_project(dict(session_id='b1', project='官网'))
+            m.review(dict(session_id='a1', utterance_id='u1', verdict='confirmed'))
+            m.review(dict(session_id='a1', utterance_id='u2', verdict='confirmed'))
+            m.review(dict(session_id='a1', utterance_id='u3', verdict='rejected'))
+            m.review(dict(session_id='b1', utterance_id='u1', verdict='confirmed'))
+            pool = m.historical('now', '那就苹果和安卓同时发', lambda a, b: 0)  # no shared words needed inside a project
+            self.assertEqual(['h:a1:u1', 'h:a1:u2'], [u['id'] for u in pool])
+            self.assertTrue(all(u['confirmed'] for u in pool))
+            self.assertEqual('简短会议', pool[0]['meeting_title'])  # three lines: the short-meeting name
+            m.set_project(dict(session_id='now', project='新项目'))
+            fallback = m.historical('now', '登录只支持手机号', overlap)  # nothing confirmed there: old keyword pool, unconfirmed
+            self.assertEqual(['h:a2:u1'], [u['id'] for u in fallback])
+            self.assertFalse(fallback[0]['confirmed'])
+            self.assertEqual([], m.historical('now', '用红色做主色调', overlap))  # a rejected decision stays out
+            projects = m.projects()['items']
+            self.assertEqual([('新项目', 1, 0), ('安卓 App', 2, 2), ('官网', 1, 1)],
+                             [(p['name'], p['meeting_count'], p['confirmed_decisions']) for p in projects])
+            page = m.project('安卓 App')
+            self.assertEqual(['a2', 'a1'], [x['session_id'] for x in page['meetings']])
+            self.assertEqual(['u1', 'u2'], [d['id'] for d in page['decisions']])
+            self.assertEqual(1, page['unreviewed_decisions'])  # a2's decision is not checked yet
+            self.assertEqual('安卓 App', m.load('a1')['project'])
+            m.sync(dict(session_id='a1', started_at=(now - dt.timedelta(hours=48)).isoformat(), utterances=[]))
+            self.assertEqual('安卓 App', m.load('a1')['project'])  # a late sync keeps it
+            self.assertEqual(None, m.set_project(dict(session_id='a1', project=''))['project'])
+            for bad in (dict(session_id='a1', project='长' * 31), dict(session_id='../x', project='x')):
+                with self.assertRaises(ValueError):
+                    m.set_project(bad)
+            with self.assertRaises(FileNotFoundError):
+                m.set_project(dict(session_id='missing', project='x'))
+            backend = Backend.__new__(Backend)
+            backend.meetings = m
+            class Protected(Handler):
+                api_token = 'k'
+            Protected.backend = backend
+            server = ThreadingHTTPServer(('127.0.0.1', 0), Protected)
+            worker = threading.Thread(target=server.serve_forever, daemon=True); worker.start()
+            try:
+                get = lambda path: json.load(urllib.request.urlopen(urllib.request.Request(
+                    f'http://127.0.0.1:{server.server_port}' + path, headers={'Authorization': 'Bearer k'})))
+                self.assertEqual(['a2'], [x['session_id'] for x in get('/v1/projects/' + urllib.parse.quote('安卓 App'))['meetings']])
+                self.assertEqual(3, len(get('/v1/projects')['items']))
+            finally:
+                server.shutdown(); server.server_close(); worker.join()
 
 
 

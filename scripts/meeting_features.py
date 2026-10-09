@@ -497,7 +497,7 @@ class Meetings:
             rows = [self.load(n[:-5]) for n in os.listdir(self.dir) if n.endswith('.json')]
             rows.sort(key=lambda r: r['started_at'], reverse=True)
             return dict(count=len(rows), items=[dict(session_id=r['session_id'], started_at=r['started_at'],
-                title=r['display_title'], title_source=r['title_source'],
+                title=r['display_title'], title_source=r['title_source'], project=r.get('project'),
                 ended_at=r.get('ended_at'), goal=(r.get('agenda') or {}).get('goal', ''),
                 utterance_count=len(r['utterances']), digest_counts={t: len(r['digest'][t]) for t in DIGEST},
                 review_pending={k: sum(q['kind'] == k for q in r['review_queue']) for k in ('commitment', 'decision', 'speaker')})
@@ -514,18 +514,102 @@ class Meetings:
             if os.path.isfile(path): os.unlink(path)
         return dict(deleted=True)
 
+    PROJECT_POOL = 30
+
     def historical(self, sid, query, overlap):
+        """Earlier decisions and constraints to check a new one against.
+
+        With a project: every decision a person confirmed in that project's other meetings (newest first), so a
+        differently worded contradiction is still found. Otherwise, or when the project has none confirmed yet:
+        the old keyword-matched pool from the last ten meetings, marked unconfirmed.
+        """
         with self.lock:
-            sessions = self.listing(100)['items']
-            sessions = [s for s in sessions if s['session_id'] != sid][:10]
+            sessions = [s for s in self.listing(100)['items'] if s['session_id'] != sid]
+            project = self.project_of(sid)
+            def item(s, u, confirmed):
+                return dict(id=f"h:{s['session_id']}:{u['id']}", text=u['text'], start_ms=u['start_ms'], end_ms=u['end_ms'],
+                            tag=u.get('tag'), speaker=u.get('review', {}).get('speaker') or u.get('speaker'),
+                            session_id=s['session_id'], started_at=s['started_at'], meeting_title=s['title'], confirmed=confirmed)
+            if project:
+                pool = []
+                for s in (s for s in sessions if s.get('project') == project):
+                    row = self.load(s['session_id'])
+                    pool += [item(s, u, True) for u in row['utterances'] if u.get('tag') in ('decision', 'constraint')
+                             and u.get('review', {}).get('verdict') == 'confirmed']
+                if pool:
+                    return pool[:self.PROJECT_POOL]
             pool = []
-            for s in sessions:
+            for s in sessions[:10]:
                 row = self.load(s['session_id'])
-                for u in row['utterances']:
-                    if u.get('tag') in ('decision', 'constraint') and u.get('review', {}).get('verdict') != 'rejected':
-                        pool.append(dict(u, id=f"h:{s['session_id']}:{u['id']}", session_id=s['session_id'], started_at=s['started_at']))
+                pool += [item(s, u, False) for u in row['utterances'] if u.get('tag') in ('decision', 'constraint')
+                         and u.get('review', {}).get('verdict') != 'rejected']
             return sorted((u for u in pool if overlap(query, u['text']) > 0),
                           key=lambda u: -overlap(query, u['text']))[:10]
+
+    def project_of(self, sid):
+        try:
+            return read_json(self.path(sid)).get('project')
+        except (OSError, ValueError):
+            return None
+
+    def set_project(self, req):
+        """Which project a meeting belongs to; an empty name takes it out of any project."""
+        sid = identifier(req.get('session_id'))
+        project = text(req.get('project', ''), 200).strip()
+        if len(project) > 30:
+            raise ValueError('项目名称最多 30 个字')
+        with self.lock:
+            path = self.path(sid)
+            if os.path.exists(path + '.deleted') or not os.path.isfile(path):
+                raise FileNotFoundError(sid)
+            row = read_json(path)
+            if project:
+                row['project'] = project
+            else:
+                row.pop('project', None)
+            self.write(sid, row)
+        return dict(session_id=sid, project=project or None)
+
+    def projects(self):
+        """Every project name in use, with how much it holds, most recently active first."""
+        with self.lock:
+            groups = {}
+            for s in self.listing(100)['items']:
+                if s.get('project'):
+                    groups.setdefault(s['project'], []).append(s)
+            items = []
+            for name, meetings in groups.items():
+                confirmed = 0
+                for s in meetings:
+                    row = self.load(s['session_id'])
+                    confirmed += sum(1 for u in row['utterances'] if u.get('tag') in ('decision', 'constraint')
+                                     and u.get('review', {}).get('verdict') == 'confirmed')
+                items.append(dict(name=name, meeting_count=len(meetings), confirmed_decisions=confirmed,
+                                  last_started_at=max(s['started_at'] for s in meetings)))
+            items.sort(key=lambda p: p['last_started_at'], reverse=True)
+            return dict(items=items)
+
+    def project(self, name):
+        """One project: its meetings, its confirmed decisions and constraints, and how many still wait for a review."""
+        name = text(name, 200).strip()
+        if not name:
+            raise ValueError('缺少项目名称')
+        with self.lock:
+            meetings = [s for s in self.listing(100)['items'] if s.get('project') == name]
+            decisions, unreviewed = [], 0
+            for s in meetings:
+                row = self.load(s['session_id'])
+                for u in sorted(row['utterances'], key=lambda u: u['start_ms']):
+                    if u.get('tag') not in ('decision', 'constraint'):
+                        continue
+                    verdict = u.get('review', {}).get('verdict')
+                    if verdict == 'confirmed':
+                        decisions.append(dict(id=u['id'], text=u['text'], tag=u['tag'], start_ms=u['start_ms'], end_ms=u['end_ms'],
+                                              speaker=u.get('review', {}).get('speaker') or u.get('speaker'),
+                                              session_id=s['session_id'], started_at=s['started_at'], meeting_title=s['title']))
+                    elif verdict is None and u['tag'] == 'decision':
+                        unreviewed += 1
+            return dict(name=name, meetings=meetings, decisions=decisions, unreviewed_decisions=unreviewed)
 
     def search(self, query, jev, overlap, jev_recall):
         text(query, 500)

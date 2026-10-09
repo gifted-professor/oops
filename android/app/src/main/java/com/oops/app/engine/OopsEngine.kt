@@ -1643,8 +1643,16 @@ object OopsEngine {
                 if (prior == null && !otherId.startsWith("h:")) return@launch
                 if (!conflictPairs.add("${u.id}:$otherId")) return@launch
                 val priorText = prior?.text ?: h.getString("text")
-                val prefix = if (prior == null) "${java.time.Instant.parse(h.getString("started_at")).atZone(java.time.ZoneId.systemDefault()).format(java.time.format.DateTimeFormatter.ofPattern("MM/dd"))} 会议" else "${(prior.startMs / 60000)} 分钟"
-                publishNotice(t.add(com.oops.app.notice.Notice(kind = "conflict", title = "可能与之前的约束冲突",
+                val confirmed = prior == null && h.optBoolean("confirmed")
+                val day = if (prior == null) java.time.Instant.parse(h.getString("started_at")).atZone(java.time.ZoneId.systemDefault())
+                    .format(java.time.format.DateTimeFormatter.ofPattern("MM/dd")) else ""
+                val meeting = h.optString("meeting_title").takeIf { prior == null && it.isNotBlank() && it != "null" }
+                val prefix = when {
+                    prior != null -> "${(prior.startMs / 60000)} 分钟"
+                    else -> "$day ${meeting?.let { "《$it》" } ?: "会议"}${if (confirmed) "已确认" else "（未核对）"}"
+                }
+                publishNotice(t.add(com.oops.app.notice.Notice(kind = "conflict",
+                    title = if (confirmed) "可能与已确认的决定冲突" else "可能与之前的约束冲突",
                     detail = "$prefix：「$priorText」\n本场：「${u.text}」", atMs = nowMs,
                     evidenceIds = listOf(u.id, otherId), history = if (prior == null) h else null)), session)
             } catch (error: CancellationException) { throw error }
@@ -1751,6 +1759,39 @@ object OopsEngine {
 
     private fun corrected(session: String, id: String, speaker: String?, status: String) = JSONObject()
         .put("sessionId", session).put("utteranceId", id).put("speaker", speaker ?: JSONObject.NULL).put("status", status)
+
+    fun projects(name: String? = null) {
+        val client = api
+        scope.launch {
+            try {
+                val result = if (name == null) client.projects() else client.project(name)
+                if (result == null) fail("projects", "当前后端不支持项目")
+                else emit(OopsEvent.Json(if (name == null) "projects.list" else "project.open", result))
+            } catch (error: CancellationException) { throw error }
+            catch (error: Exception) { fail("projects", "项目请求失败：${error.message}") }
+        }
+    }
+
+    /** Puts a meeting in a project; this meeting's text may still be on its way to the server, so a live one retries. */
+    fun setMeetingProject(session: String, project: String) {
+        val name = project.trim()
+        require(name.length <= 30) { "项目名称最多 30 个字" }
+        val live = session == sessionId
+        val client = api
+        scope.launch {
+            try {
+                var result = client.setMeetingProject(session, name)
+                var tries = 0
+                while (result == null && live && tries++ < REVIEW_RETRIES) {
+                    delay(REVIEW_RETRY_MS)
+                    result = client.setMeetingProject(session, name)
+                }
+                if (result == null) fail("projects", if (live) "服务器还没有这场会议的文字，稍后再设项目" else "当前后端不支持项目")
+                else emit(OopsEvent.Json("meeting.project", result))
+            } catch (error: CancellationException) { throw error }
+            catch (error: Exception) { fail("projects", "项目没有保存：${error.message}") }
+        }
+    }
 
     fun renameMeeting(session: String, title: String) {
         require(title.trim().length <= 40) { "会议名称最多 40 个字" }

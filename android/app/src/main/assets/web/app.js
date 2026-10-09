@@ -39,6 +39,7 @@
     team: [],
     tasks: { mine: true, status: 'open', items: null },
     tab: 'session', pane: 'live',
+    projects: { items: null, open: null, section: 'decisions' }, liveProject: null,
   };
 
   // ---- helpers --------------------------------------------------------------------------
@@ -112,6 +113,9 @@
       case 'history.delete': toast('会议文字已删除'); if (S.pane === 'history') closeSheet(); send('history.list'); break;
       case 'history.search': historySearch(p); break;
       case 'history.renamed': onRenamed(p); break;
+      case 'projects.list': S.projects.items = p.items || []; if (S.tab === 'projects' && !S.projects.open) renderProjects(); if (S.sheet?.kind === 'projectPick') renderSheet(); break;
+      case 'project.open': S.projects.open = p; if (S.tab === 'projects') renderProjects(); break;
+      case 'meeting.project': onMeetingProject(p); break;
       case 'speaker.corrected': onSpeakerCorrected(p); break;
       case 'review.saved': onReviewSaved(p); break;
       case 'tasks.list': S.tasks = { ...S.tasks, items: p.items || [] }; if (S.tab === 'tasks') renderTasks(); break;
@@ -186,6 +190,7 @@
   }
 
   function resetTranscript() {
+    S.liveProject = null;
     $('lines').innerHTML = '';
     S.lines.clear();
     S.records.clear();
@@ -248,6 +253,8 @@
     const current = (a.items || []).find(i => i.id === a.currentItemId);
     const covered = (a.items || []).filter(i => i.coveredMs > 0).length;
     $('btn-agenda').textContent = a.goal || a.items?.length ? `议程 ${covered}/${a.items?.length || 0} · ${current?.title || a.goal || '等待讨论'} · ${clock(s.sessionMs)}${a.plannedMs ? '/' + clock(a.plannedMs) : ''}` : '＋本场目标与议程';
+    $('btn-project').hidden = !s.sessionId;
+    $('btn-project').textContent = S.liveProject ? `项目：${S.liveProject}` : '＋所属项目';
     $('agenda-note').textContent = a.tracking === 'unsupported' ? '当前后端仅支持时间提醒' : '';
     $('sync-note').textContent = !s.memorySync ? '会议文字同步已关闭' : s.syncStatus === 'failed' ? '文字同步已停止，请检查服务器或删除状态' : s.syncStatus === 'unsupported' ? '当前后端不支持会议文字同步' : s.sessionId ? `文字同步到团队服务器 · ${s.syncStatus === 'retrying' ? '等待重试 · ' : ''}待同步 ${s.syncPending || 0}` : '';
 
@@ -466,7 +473,8 @@
         <div class="row"><button class="chip ghost" data-act="rename-cancel">取消</button><button class="chip" data-act="rename-save">保存名称</button></div>`;
     }
     return `<p class="page-title meeting-title">${esc(meetingName(h))}</p>
-      <div class="row"><span class="fine">${esc(source)}</span><button class="chip ghost" data-act="rename-start">改名</button></div>`;
+      <div class="row"><span class="fine">${esc(source)}</span><button class="chip ghost" data-act="rename-start">改名</button>
+        <button class="chip ${h.project ? '' : 'ghost'}" data-act="history-project">${h.project ? '项目：' + esc(h.project) : '＋所属项目'}</button></div>`;
   }
 
   function historyTranscriptHtml() {
@@ -499,19 +507,68 @@
     const body = needSelf
       ? `<p class="fine">先选你是谁，才能看"我的"任务：</p><div class="owner-candidates">${S.team.map((n) => `<button class="btn ghost" data-act="tasks-self" data-name="${esc(n)}">${esc(n)}</button>`).join('')}</div>`
       : t.items == null ? spinnerHtml('正在读取飞书任务…', '状态最多缓存 5 分钟')
-      : `<div class="cands">${t.items.map((i) => {
+      : `<div class="cands">${t.items.map(taskRowHtml).join('') || '<p class="fine">没有符合条件的任务。</p>'}</div>`;
+    return `<p class="page-title">任务</p>
+      <div class="row">${tab('tasks-scope', 'mine', t.mine ? 'mine' : 'all', '我的' + (S.state.selfName ? `（${esc(S.state.selfName)}）` : ''))}${tab('tasks-scope', 'all', t.mine ? 'mine' : 'all', '全部')}</div>
+      <div class="row">${tab('tasks-status', 'open', t.status, '未完成')}${tab('tasks-status', 'done', t.status, '已完成')}${tab('tasks-status', 'all', t.status, '全部')}</div>
+      ${body}
+      <p class="footnote">只列经你确认后由 Oops 建的飞书任务；点开在飞书里查看和完成。</p>`;
+  }
+  function taskRowHtml(i) {
         const state = i.overdue ? '逾期' : TASK_STATE[i.feishu?.state] || '未完成';
         const due = i.feishu?.due_ms ? new Date(i.feishu.due_ms).toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' }) : (i.when?.raw || '');
         return `<button class="cand task-row" data-act="task-open" data-url="${esc(i.url || '')}"><span><span class="t">${esc(i.what)}</span>
           <span class="meta">${esc(i.who || '负责人待定')}${due ? ' · 截止 ' + esc(due) : ''} · <span class="task-state state-${esc(i.overdue ? 'overdue' : i.feishu?.state || 'open')}">${state}</span>${i.feishu?.stale ? ' · 可能不是最新' : ''}</span>
           ${i.quote ? `<span class="meta">“${esc(i.quote)}”</span>` : ''}
           ${i.meeting ? `<span class="meta">${esc(formatDate(i.meeting.started_at))}${i.meeting.title || i.meeting.goal ? ' · ' + esc(i.meeting.title || i.meeting.goal) : ''}</span>` : ''}</span></button>`;
-      }).join('') || '<p class="fine">没有符合条件的任务。</p>'}</div>`;
-    return `<p class="page-title">任务</p>
-      <div class="row">${tab('tasks-scope', 'mine', t.mine ? 'mine' : 'all', '我的' + (S.state.selfName ? `（${esc(S.state.selfName)}）` : ''))}${tab('tasks-scope', 'all', t.mine ? 'mine' : 'all', '全部')}</div>
-      <div class="row">${tab('tasks-status', 'open', t.status, '未完成')}${tab('tasks-status', 'done', t.status, '已完成')}${tab('tasks-status', 'all', t.status, '全部')}</div>
-      ${body}
-      <p class="footnote">只列经你确认后由 Oops 建的飞书任务；点开在飞书里查看和完成。</p>`;
+  }
+
+  // ---- projects -----------------------------------------------------------------------------
+
+  function renderProjects() { $('view-projects').innerHTML = projectsHtml(); }
+  function projectsHtml() {
+    const P = S.projects;
+    if (P.open) {
+      const p = P.open, sec = P.section;
+      const tab = (value, label) => `<button class="chip ${value === sec ? '' : 'ghost'}" data-act="project-section" data-value="${value}">${label}</button>`;
+      const body = sec === 'decisions'
+        ? `${p.unreviewed_decisions ? `<p class="fine">另有 ${p.unreviewed_decisions} 条决定还没会后核对。核对确认后会出现在这里，并用于开会时的冲突提醒。</p>` : ''}
+          <div class="cands">${p.decisions.map((d) => `<button class="cand decision-row" data-act="history-open" data-id="${esc(d.session_id)}"><span class="t">${esc(d.text)}</span>
+            <span class="meta"><span class="tag-kind">${d.tag === 'constraint' ? '约束' : '决定'}</span> · ${esc(formatDate(d.started_at))} ·《${esc(d.meeting_title || '会议')}》${d.speaker ? ' · ' + esc(manualLabel(d.speaker)) : ''}</span></button>`).join('') || '<p class="fine">还没有确认过的决定。</p>'}</div>`
+        : sec === 'tasks' ? `<div class="cands">${p.tasks.map(taskRowHtml).join('') || '<p class="fine">这个项目的会议还没有建过飞书任务。</p>'}</div>`
+        : `<div class="cands">${historyRowsHtml(p.meetings)}</div>`;
+      return `<button class="back-link" data-act="project-back">‹ 全部项目</button><p class="page-title">${esc(p.name)}</p>
+        <div class="row">${tab('decisions', `决定 ${p.decisions.length}`)}${tab('tasks', `任务 ${p.tasks.length}`)}${tab('meetings', `会议 ${p.meetings.length}`)}</div>${body}`;
+    }
+    const items = P.items;
+    return `<p class="page-title">项目</p>
+      ${items == null ? spinnerHtml('正在读取项目…', '团队服务器') : `<div class="cands">${items.map((p) => `<button class="cand" data-act="project-open" data-name="${esc(p.name)}"><span class="t">${esc(p.name)}</span>
+        <span class="meta">${p.meeting_count} 场会议 · 已确认决定 ${p.confirmed_decisions} · 最近 ${esc(formatDate(p.last_started_at))}</span></button>`).join('') || '<p class="fine">还没有项目。在往期会议的纪要里点"所属项目"，把会议归进项目。</p>'}</div>`}
+      <p class="footnote">同一项目里确认过的决定，会在之后开会时用来提醒"和之前定的不一样"。</p>`;
+  }
+  function openProjectPick(sessionId, current) {
+    openSheet({ kind: 'projectPick', sessionId, current, back: S.sheet?.kind === 'historyDigest' ? 'historyDigest' : null });
+    send('projects.list');
+  }
+  function projectPickHtml() {
+    const p = S.sheet, names = (S.projects.items || []).map((x) => x.name);
+    return `${sheetHead('所属项目')}
+      <p class="fine">同一项目里确认过的决定，会用来提醒这场会里"和之前定的不一样"。</p>
+      <div class="owner-candidates">${names.map((n) => `<button class="btn ${n === p.current ? 'primary' : 'ghost'}" data-act="project-set" data-name="${esc(n)}">${esc(n)}</button>`).join('') || '<span class="fine">还没有项目</span>'}</div>
+      <label class="field"><span>新项目</span><input id="project-new" maxlength="30" placeholder="例如：安卓 App"></label>
+      <div class="row"><button class="chip" data-act="project-create">用这个新项目</button>${p.current ? '<button class="chip ghost" data-act="project-set" data-name="">移出项目</button>' : ''}</div>
+      ${p.back ? '<button class="btn ghost" data-act="project-pick-back">返回纪要</button>' : ''}`;
+  }
+  function onMeetingProject(p) {
+    if (S.history?.session_id === p.session_id) S.history.project = p.project;
+    if (p.session_id === S.state.sessionId) { S.liveProject = p.project; renderStatus(); }
+    const item = (S.historyItems || []).find((i) => i.session_id === p.session_id);
+    if (item) item.project = p.project;
+    S.projects.items = null;
+    if (S.sheet?.kind === 'projectPick') {
+      if (S.sheet.back && S.history?.session_id === p.session_id) openSheet({ kind: S.sheet.back }); else closeSheet();
+    }
+    toast(p.project ? `已归入「${p.project}」` : '已移出项目');
   }
 
   function setSummary(p) {
@@ -600,6 +657,7 @@
       speaker: speakerPickHtml,
       historyTranscript: historyTranscriptHtml,
       review: reviewHtml,
+      projectPick: projectPickHtml,
     }[k];
     $('sheet').innerHTML = html ? html() : '';
     syncPlayButtons();
@@ -988,6 +1046,8 @@
     $('view-session').hidden = tab !== 'session';
     $('view-tasks').hidden = tab !== 'tasks';
     $('view-me').hidden = tab !== 'me';
+    $('view-projects').hidden = tab !== 'projects';
+    if (tab === 'projects') { S.projects.open = null; S.projects.items = null; renderProjects(); send('projects.list'); }
     $('btn-ask').hidden = tab !== 'session';
     if (tab === 'tasks') openTasks();
     if (tab === 'me') $('view-me').innerHTML = settingsHtml(true);
@@ -1189,6 +1249,13 @@
       else send('clip.remote', { key, sessionId: p.sessionId, startMs: p.startMs, endMs: p.endMs });
     },
     'history-transcript': () => openSheet({ kind: 'historyTranscript' }),
+    'history-project': () => openProjectPick(S.history.session_id, S.history.project || null),
+    'project-set': (el) => send('meeting.project', { sessionId: S.sheet.sessionId, project: el.dataset.name }),
+    'project-create': () => { const name = $('project-new').value.trim(); if (!name) return toast('请输入项目名称'); send('meeting.project', { sessionId: S.sheet.sessionId, project: name }); },
+    'project-pick-back': () => openSheet({ kind: S.sheet.back }),
+    'project-open': (el) => { S.projects.open = null; S.projects.section = 'decisions'; $('view-projects').innerHTML = spinnerHtml('正在读取项目…', el.dataset.name); send('project.open', { name: el.dataset.name }); },
+    'project-back': () => { S.projects.open = null; S.projects.items = null; renderProjects(); send('projects.list'); },
+    'project-section': (el) => { S.projects.section = el.dataset.value; renderProjects(); },
     'rename-start': () => { S.sheet.renaming = true; renderSheet(); $('rename-input')?.focus(); },
     'rename-cancel': () => { S.sheet.renaming = false; renderSheet(); },
     'rename-save': () => send('history.rename', { sessionId: S.history.session_id, title: $('rename-input').value.trim() }),
@@ -1268,7 +1335,8 @@
   $('tabbar').addEventListener('click', (e) => { const b = e.target.closest('[data-tab]'); if (b) switchTab(b.dataset.tab); });
   $('session-seg').addEventListener('click', (e) => { const b = e.target.closest('[data-pane]'); if (b) switchPane(b.dataset.pane); });
   // Pages use the same actions as the sheet.
-  ['view-tasks', 'view-me', 'pane-history'].forEach((id) => $(id).addEventListener('click', (e) => {
+  $('btn-project').addEventListener('click', () => openProjectPick(S.state.sessionId, S.liveProject));
+  ['view-tasks', 'view-me', 'view-projects', 'pane-history'].forEach((id) => $(id).addEventListener('click', (e) => {
     const el = e.target.closest('[data-act]');
     if (el && !el.disabled) ACTIONS[el.dataset.act]?.(el);
   }));

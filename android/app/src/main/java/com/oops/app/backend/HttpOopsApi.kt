@@ -36,6 +36,13 @@ class HttpOopsApi(private val http: OkHttpClient, baseUrl: String, private val t
     override suspend fun historyDelete(id: String) = optional("/v1/meetings/delete", JSONObject().put("session_id", id).put("confirm", true))
     override suspend fun historySearch(query: String) = optional("/v1/meetings/search", JSONObject().put("query", query))
     override suspend fun reviewMeeting(request: JSONObject) = optional("/v1/meetings/review", request)
+    override suspend fun projects() = optionalGet("/v1/projects")
+    override suspend fun project(name: String): JSONObject? {
+        require(name.isNotBlank() && name.length <= 30)
+        return optionalGet("/v1/projects/" + java.net.URLEncoder.encode(name, "UTF-8").replace("+", "%20"))
+    }
+    override suspend fun setMeetingProject(sessionId: String, project: String) =
+        optional("/v1/meetings/project", JSONObject().put("session_id", sessionId).put("project", project))
     override suspend fun renameMeeting(sessionId: String, title: String) =
         optional("/v1/meetings/rename", JSONObject().put("session_id", sessionId).put("title", title))
     override suspend fun tasks(assignee: String?, status: String): JSONObject? {

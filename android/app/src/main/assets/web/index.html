@@ -34,6 +34,7 @@
     <div class="gap-banner" id="gap-banner" hidden></div>
     <div class="speaker-preview-status" id="speaker-preview-status" hidden></div>
     <button class="chip" id="btn-agenda">＋本场目标与议程</button>
+    <button class="chip ghost" id="btn-project" hidden>＋所属项目</button>
     <span class="fine" id="agenda-note"></span><div class="fine" id="sync-note"></div>
     <button class="chip" id="btn-commitments" hidden></button><button class="chip ghost" id="btn-notices" hidden></button>
   </section>
@@ -58,11 +59,13 @@
   <div class="pane page" id="pane-history" hidden></div>
   </div>
   <div class="view page" id="view-tasks" hidden></div>
+  <div class="view page" id="view-projects" hidden></div>
   <div class="view page" id="view-me" hidden></div>
 
   <nav class="tabbar" id="tabbar" aria-label="主导航">
     <button class="on" data-tab="session"><span class="tab-icon" aria-hidden="true">◉</span>会话</button>
     <button data-tab="tasks"><span class="tab-icon" aria-hidden="true">✓</span>任务</button>
+    <button data-tab="projects"><span class="tab-icon" aria-hidden="true">▤</span>项目</button>
     <button data-tab="me"><span class="tab-icon" aria-hidden="true">☺</span>我的</button>
   </nav>
 

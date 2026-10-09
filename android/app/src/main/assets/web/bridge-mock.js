@@ -161,11 +161,30 @@
             digest: {constraint: [], commitment: [], decision: [], idea: []}, notices: []});
         }
         const meeting = mockMeetings.find(i => i.session_id === p.sessionId); if (!meeting) return emit('error', {scope: 'history', message: '会议已删除'});
-        emit('history.open', {...meeting, display_title: meeting.manualTitle || meeting.goal, title_source: meeting.manualTitle ? 'manual' : 'generated', utterances: historicalRows, review_queue: reviewQueue(historicalRows),
+        emit('history.open', {...meeting, project: meeting.project || null, display_title: meeting.manualTitle || meeting.goal, title_source: meeting.manualTitle ? 'manual' : 'generated', utterances: historicalRows, review_queue: reviewQueue(historicalRows),
           digest: {constraint: historicalRows.filter(u => u.tag === 'constraint'), commitment: historicalRows.filter(u => u.tag === 'commitment' && u.review?.verdict !== 'rejected'),
             decision: historicalRows.filter(u => u.tag === 'decision' && u.review?.verdict !== 'rejected'), idea: []}, notices: []}); break;
       }
       case 'history.delete': if (p.confirm) {mockMeetings = mockMeetings.filter(i => i.session_id !== p.sessionId); emit('history.delete', {deleted: true});} break;
+      case 'projects.list': {
+        const groups = {};
+        mockMeetings.forEach((m) => { if (m.project) (groups[m.project] ||= []).push(m); });
+        setTimeout(() => emit('projects.list', {items: Object.entries(groups).map(([name, ms]) => ({name, meeting_count: ms.length,
+          confirmed_decisions: historicalRows.filter((u) => u.review?.verdict === 'confirmed' && ['decision', 'constraint'].includes(u.tag)).length,
+          last_started_at: ms[0].started_at}))}), 200); break;
+      }
+      case 'project.open': {
+        const ms = mockMeetings.filter((m) => m.project === p.name).map((m) => ({...m, title: m.manualTitle || m.goal}));
+        const decisions = ms.length ? historicalRows.filter((u) => u.review?.verdict === 'confirmed' && ['decision', 'constraint'].includes(u.tag))
+          .map((u) => ({...u, session_id: 'demo', started_at: ms[0].started_at, meeting_title: ms[0].title})) : [];
+        setTimeout(() => emit('project.open', {name: p.name, meetings: ms, decisions, tasks: ms.length ? mockTasks.slice(0, 1) : [],
+          unreviewed_decisions: historicalRows.filter((u) => u.tag === 'decision' && !u.review?.verdict).length}), 200); break;
+      }
+      case 'meeting.project': {
+        const meeting = mockMeetings.find((m) => m.session_id === p.sessionId);
+        if (meeting) meeting.project = p.project || null;
+        setTimeout(() => emit('meeting.project', {session_id: p.sessionId, project: p.project || null}), 200); break;
+      }
       case 'history.rename': {
         const meeting = mockMeetings.find((m) => m.session_id === p.sessionId);
         if (meeting) { meeting.manualTitle = p.title || null; }

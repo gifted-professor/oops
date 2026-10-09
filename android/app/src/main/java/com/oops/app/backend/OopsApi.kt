@@ -14,6 +14,10 @@ interface OopsApi {
     suspend fun historyDelete(id: String): org.json.JSONObject? = null
     suspend fun historySearch(query: String): org.json.JSONObject? = null
     /** A person's correction of one sentence; null when the server does not have that meeting (yet). */
+    /** Projects in use, one project's page (meetings, confirmed decisions, tasks), and a meeting's project. */
+    suspend fun projects(): org.json.JSONObject? = null
+    suspend fun project(name: String): org.json.JSONObject? = null
+    suspend fun setMeetingProject(sessionId: String, project: String): org.json.JSONObject? = null
     /** A person's name for a past meeting; an empty title returns to the automatic one. */
     suspend fun renameMeeting(sessionId: String, title: String): org.json.JSONObject? = null
     suspend fun reviewMeeting(request: org.json.JSONObject): org.json.JSONObject? = null

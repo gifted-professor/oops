@@ -37,7 +37,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from zoneinfo import ZoneInfo
-from urllib.parse import urlsplit, parse_qs
+from urllib.parse import urlsplit, parse_qs, unquote
 from meeting_features import Meetings, judge_notice
 from voiceprint_registry import VoiceprintRegistry, audio_quality, person_profiles
 from voiceprint_invites import invite_person
@@ -1307,6 +1307,7 @@ class Backend:
                     self.recordings.delete(body.get('session_id'))
                 return result
             if action == 'rename': return self.meetings.rename(body)
+            if action == 'project': return self.meetings.set_project(body)
             if action == 'review':
                 result = self.meetings.review(body)
                 self.remember_review(body)
@@ -1357,6 +1358,16 @@ class Backend:
         finally:
             with self.speaker_state_lock:
                 self._state('title_pending').pop(sid, None)
+
+    def project(self, name):
+        """A project page: meetings and confirmed decisions from the meeting store, tasks with their Feishu state."""
+        try:
+            value = self.meetings.project(name)
+        except ValueError as error:
+            raise ApiError(400, 'BAD_REQUEST', str(error)) from None
+        sessions = {m['session_id'] for m in value['meetings']}
+        value['tasks'] = [t for t in self.tasks()['items'] if t['session_id'] in sessions] if sessions and getattr(self, 'ops', None) else []
+        return value
 
     def remember_review(self, body):
         """A corrected speaker replaces the model's for this meeting's task drafts (still only a suggestion)."""
@@ -1928,6 +1939,10 @@ class Handler(BaseHTTPRequestHandler):
                     raise ApiError(400, "BAD_REQUEST", "缺少 start_ms 或 end_ms") from None
                 value = self.backend.recording_call("clip", urlsplit(self.path).path.split("/")[3], start=start, end=end)
                 summary = f"clip bytes={len(value)}"
+            elif method == "GET" and urlsplit(self.path).path == "/v1/projects":
+                value = self.backend.meetings.projects()
+            elif method == "GET" and urlsplit(self.path).path.startswith("/v1/projects/"):
+                value = self.backend.project(unquote(urlsplit(self.path).path[len("/v1/projects/"):]))
             elif method == "GET" and urlsplit(self.path).path == "/v1/tasks":
                 query = parse_qs(urlsplit(self.path).query)
                 value = self.backend.tasks(query.get("assignee", [None])[0], query.get("status", ["all"])[0])
@@ -1976,7 +1991,7 @@ class Handler(BaseHTTPRequestHandler):
                     _, _, _, sid, action = self.path.split("/")
                     value = self.backend.recording_call(action, sid, body)
                     summary = f"recording {action} complete={value.get('complete')}"
-                elif self.path in ('/v1/meetings/sync', '/v1/meetings/delete', '/v1/meetings/search', '/v1/meetings/review', '/v1/meetings/rename'):
+                elif self.path in ('/v1/meetings/sync', '/v1/meetings/delete', '/v1/meetings/search', '/v1/meetings/review', '/v1/meetings/rename', '/v1/meetings/project'):
                     value = self.backend.meeting_call(self.path.rsplit('/', 1)[1], body)
                 elif self.path == "/v1/recall":
                     value = self.backend.recall(body)
