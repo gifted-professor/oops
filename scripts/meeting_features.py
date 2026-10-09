@@ -243,6 +243,9 @@ def meeting_title(row):
     generated = row.get('auto_title') or {}
     if generated.get('title'):
         return generated['title'], 'generated'
+    if 0 < len(row['utterances']) < Meetings.TITLE_MIN_UTTERANCES:
+        # A few stray lines rarely say what a meeting was about, and quoting them in a shared list reads badly.
+        return '简短会议', 'short'
     for tag in ('decision', 'commitment', 'constraint'):
         picks = sorted(row['digest'][tag], key=lambda u: u.get('review', {}).get('verdict') != 'confirmed')
         for u in picks:

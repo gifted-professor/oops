@@ -460,7 +460,7 @@
   }
 
   function renameHtml() {
-    const h = S.history, source = { manual: '手动命名', agenda: '议程目标', generated: 'AI 概括', auto: '按原话自动取', none: '' }[h.title_source] || '';
+    const h = S.history, source = { manual: '手动命名', agenda: '议程目标', generated: 'AI 概括', auto: '按原话自动取', short: '内容较少', none: '' }[h.title_source] || '';
     if (S.sheet.renaming) {
       return `<label class="field"><span>会议名称（留空恢复自动名称）</span><input id="rename-input" maxlength="40" value="${esc(h.title_source === 'manual' ? h.display_title : '')}" placeholder="${esc(h.display_title || '例如：安卓版本排期')}"></label>
         <div class="row"><button class="chip ghost" data-act="rename-cancel">取消</button><button class="chip" data-act="rename-save">保存名称</button></div>`;

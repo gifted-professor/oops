@@ -335,7 +335,8 @@ class FeatureTest(unittest.TestCase):
             started = dt.datetime.now(dt.timezone.utc).isoformat()
             rows = [dict(utterance('u1', '嗯嗯', None), start_ms=0, end_ms=500),
                     dict(utterance('u2', '那我周五前把新方案发你。', 'commitment'), start_ms=1000, end_ms=2000),
-                    dict(utterance('u3', '就是先做安卓版本，苹果的以后再说。', 'decision'), start_ms=3000, end_ms=4000)]
+                    dict(utterance('u3', '就是先做安卓版本，苹果的以后再说。', 'decision'), start_ms=3000, end_ms=4000),
+                    dict(utterance('u5', '好的', None), start_ms=7000, end_ms=7500), dict(utterance('u6', '可以', None), start_ms=8000, end_ms=8500)]
             m.sync(dict(session_id='s', started_at=started, utterances=rows))
             self.assertEqual(('先做安卓版本，苹果的以后再说', 'auto'), (m.load('s')['display_title'], m.load('s')['title_source']))
             m.review(dict(session_id='s', utterance_id='u3', verdict='rejected'))
@@ -356,7 +357,9 @@ class FeatureTest(unittest.TestCase):
                 m.rename(dict(session_id='missing', title='x'))
             empty = Meetings(os.path.join(scratch, 'empty'), team=TEAM)
             empty.sync(dict(session_id='e', started_at=started, utterances=[dict(utterance('u1', '好的', None), start_ms=0, end_ms=500)]))
-            self.assertEqual((None, 'none'), (empty.load('e')['display_title'], empty.load('e')['title_source']))
+            self.assertEqual(('简短会议', 'short'), (empty.load('e')['display_title'], empty.load('e')['title_source']))
+            empty.sync(dict(session_id='z', started_at=started, utterances=[]))
+            self.assertEqual((None, 'none'), (empty.load('z')['display_title'], empty.load('z')['title_source']))
 
     def test_generated_titles_for_finished_meetings_only(self):
         with tempfile.TemporaryDirectory() as scratch:
