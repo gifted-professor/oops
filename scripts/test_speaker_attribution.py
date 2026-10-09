@@ -41,6 +41,19 @@ class AttributionTest(unittest.TestCase):
         self.assertEqual([64000], calls)  # one re-score of the joined 2 s run only
         self.assertIsNone(out[1]["speaker"])
 
+    def test_one_sentence_is_not_broken_into_single_character_lines(self):
+        # Seen live: "现 | 在个 | 那 | 我就把这个 api 抽上 | 来", every part unnamed and over a second long.
+        unknown = lambda text, a, b: segment(text, start_ms=a, end_ms=b, speaker=None, source=None, tier="C")
+        parts = [unknown("现", 0, 1200), unknown("在个", 1200, 2600), unknown("那", 2600, 3900),
+                 unknown("我就把这个 api 抽上", 3900, 7000), unknown("来", 7000, 8200)]
+        merged = merge_for_display(parts)
+        self.assertEqual("现在个那我就把这个 api 抽上来", "".join(m["text"] for m in merged))
+        self.assertTrue(all(len(m["text"]) >= 6 for m in merged), [m["text"] for m in merged])
+        self.assertEqual((0, 8200), (merged[0]["start_ms"], merged[-1]["end_ms"]))
+        # A short named part is information and stays; only unnamed fragments are folded.
+        named = [segment("嗯好", start_ms=0, end_ms=1500, speaker=TEAM[0]), unknown("我们接着往下说吧", 1500, 5000)]
+        self.assertEqual(["嗯好", "我们接着往下说吧"], [m["text"] for m in merge_for_display(named)])
+
     def test_trial_display_folds_fragments_without_losing_text(self):
         parts = [segment("林说了一大段", start_ms=0, end_ms=3000, speaker=TEAM[0]),
                  segment("嗯", start_ms=3000, end_ms=3300, speaker=None, overlap=True, tier="C"),

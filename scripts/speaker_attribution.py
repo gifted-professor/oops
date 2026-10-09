@@ -98,9 +98,12 @@ def consolidate_trial(segments, pcm, clip_start_ms, speakers, decide):
     return out
 
 
-def merge_for_display(segments, min_ms=1000):
-    """Trial display only: fold sub-second unnamed/overlap fragments into a named neighbour and join
-    same-speaker runs. Never used for owners, sync or acceptance (fragments there stay unknown)."""
+def merge_for_display(segments, min_ms=1000, min_chars=6):
+    """Trial display only: fold unnamed/overlap fragments into a neighbour (preferring a named one) and
+    join same-speaker runs. A fragment is too short to say anything about when it is under `min_ms`, or has
+    fewer than `min_chars` characters: a word with a pause around it lasts over a second yet is still one
+    word, and a line of "身份待确认" holding a single character only breaks the sentence up.
+    Never used for owners, sync or acceptance (fragments there stay unknown)."""
     def named(s):
         return s["speaker"] is not None and not s["overlap"]
 
@@ -116,7 +119,7 @@ def merge_for_display(segments, min_ms=1000):
     while changed and len(items) > 1:
         changed = False
         for i, s in enumerate(items):
-            if named(s) or s["end_ms"] - s["start_ms"] >= min_ms:
+            if named(s) or (s["end_ms"] - s["start_ms"] >= min_ms and len(s["text"]) >= min_chars):
                 continue
             left = items[i - 1] if i > 0 else None
             right = items[i + 1] if i + 1 < len(items) else None
