@@ -3,12 +3,13 @@
 Every command is simulated. These tests do not require adb, an Android device,
 microphone access, or network access.
 """
+import socket
 import subprocess
 import threading
 import unittest
 from unittest.mock import Mock, call
 
-from mac_audio_bridge import AdbReverseGuard, resolve_adb_serial
+from mac_audio_bridge import AdbReverseGuard, listening_socket, resolve_adb_serial
 
 
 ADB = "/fake/platform-tools/adb"
@@ -298,6 +299,24 @@ class ResolveAdbSerialTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     resolve_adb_serial(ADB, run=run, timeout_s=TIMEOUT)
                 run.assert_called_once_with([ADB, "devices"], **RUN_OPTIONS)
+
+
+class ListeningSocketTest(unittest.TestCase):
+    def reach(self, address, port):
+        socket.create_connection((address, port), 2).close()
+
+    def test_ipv6_listener_also_accepts_ipv4_and_ipv4_listener_refuses_ipv6(self):
+        # A phone resolving <mac>.local gets an IPv6 address first; an IPv4-only listener refuses it.
+        both = listening_socket("::", 0)
+        self.addCleanup(both.close)
+        port = both.getsockname()[1]
+        self.reach("127.0.0.1", port)
+        self.reach("::1", port)
+        only4 = listening_socket("127.0.0.1", 0)
+        self.addCleanup(only4.close)
+        self.reach("127.0.0.1", only4.getsockname()[1])
+        with self.assertRaises(OSError):
+            self.reach("::1", only4.getsockname()[1])
 
 
 if __name__ == "__main__":

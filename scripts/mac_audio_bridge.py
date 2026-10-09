@@ -459,6 +459,20 @@ def stream_wav(args, session):
         proc.kill()
 
 
+
+def listening_socket(host, port):
+    """TCP listener. An IPv6 host (e.g. `::`) also accepts IPv4: a phone resolving `<mac>.local` often gets
+    the Mac's IPv6 link-local address first, and an IPv4-only listener answers that with 'connection refused'."""
+    v6 = ":" in host
+    server = socket.socket(socket.AF_INET6 if v6 else socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    if v6:
+        server.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+    server.bind((host, port))
+    server.listen(2)
+    return server
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--list", action="store_true", help="列出可用的音频输入设备")
@@ -493,10 +507,7 @@ def main():
     guard = AdbReverseGuard(adb, args.serial, args.port) if adb else None
     device = None if args.wav else resolve_device(args.device)
 
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server.bind((args.host, args.port))
-    server.listen(2)
+    server = listening_socket(args.host, args.port)
     current = {"session": None}
 
     def send_mark(*_):
