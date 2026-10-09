@@ -34,13 +34,24 @@ def credentials(path):
             ("VOLC_API_KEY", "VOLC_APP_ID", "VOLC_ACCESS_TOKEN", "VOLC_RESOURCE_ID")}
 
 
-def request_json():
+# Same hotwords as the app (Settings.HOTWORDS); without them the probe transcribes names differently from live.
+HOTWORDS = ["Oops", "欧普斯", "Lydia", "黄丽萍", "江古月", "洪玉麟", "林春源"]
+
+
+def request_json(hotwords=True, end_window_size=None):
     # Keep in sync with VolcRequest.json; diarization is deliberately disabled.
+    request = {"model_name": "bigmodel", "enable_nonstream": True,
+               "enable_itn": True, "enable_punc": True,
+               "show_utterances": True, "result_type": "single"}
+    if hotwords:
+        words = [{"word": w} for w in HOTWORDS]
+        request["corpus"] = {"context": json.dumps({"hotwords": words}, ensure_ascii=False)}
+    if end_window_size is not None:
+        # Silence (ms) after which the provider ends a sentence; the app leaves the provider default.
+        request["end_window_size"] = end_window_size
     return {"user": {"uid": "oops-words-probe-" + uuid.uuid4().hex},
             "audio": {"format": "pcm", "codec": "raw", "rate": 16000, "bits": 16, "channel": 1},
-            "request": {"model_name": "bigmodel", "enable_nonstream": True,
-                        "enable_itn": True, "enable_punc": True,
-                        "show_utterances": True, "result_type": "single"}}
+            "request": request}
 
 
 def frame(kind, payload, last=False, compressed=False, final_sequence=False):
@@ -130,7 +141,7 @@ def probe(path, args):
     dest.mkdir(parents=True, exist_ok=True)
     finals, seen, errors, finished, server_last = [], set(), [], threading.Event(), []
     ws = websocket.create_connection(ENDPOINT, header=headers, timeout=30, enable_multithread=True)
-    ws.send_binary(frame(1, gzip.compress(json.dumps(request_json(), ensure_ascii=False).encode()), compressed=True))
+    ws.send_binary(frame(1, gzip.compress(json.dumps(request_json(not getattr(args, 'no_hotwords', False), getattr(args, 'end_window_size', None)), ensure_ascii=False).encode()), compressed=True))
 
     def receive():
         try:
@@ -207,6 +218,8 @@ def main():
     parser.add_argument("--output", default=str(ROOT / "evidence/asr-words"))
     parser.add_argument("--seconds", type=float)
     parser.add_argument("--speed", type=float, default=1.0, help="audio send pace; 1 matches the live app")
+    parser.add_argument("--no-hotwords", action="store_true", help="omit the app's hotwords (the pre-2026-10-08 probe behaviour)")
+    parser.add_argument("--end-window-size", type=int, help="sentence-ending silence in ms; unset = provider default, as in the app")
     parser.add_argument("--final-sequence", action="store_true", help="final negative sequence packet for transport diagnosis")
     args = parser.parse_args()
     if args.speed <= 0 or (args.seconds is not None and args.seconds <= 0):
