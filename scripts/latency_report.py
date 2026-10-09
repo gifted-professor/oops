@@ -39,6 +39,23 @@ def percentile(values, q):
     return ordered[min(len(ordered) - 1, max(0, math.ceil(q * len(ordered)) - 1))]
 
 
+def reuse_rates(files):
+    """Share of watched requests that reused a connection (stage `net`): a new connection costs DNS + TCP + TLS."""
+    counts = {}
+    for path in files:
+        with open(path, encoding="utf-8") as stream:
+            for raw in stream:
+                try:
+                    line = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if line.get("stage") == "net" and isinstance(line.get("reused"), bool):
+                    seen = counts.setdefault(line.get("id", "?"), [0, 0])
+                    seen[0] += line["reused"]
+                    seen[1] += 1
+    return {path: {"reused": a, "calls": n} for path, (a, n) in sorted(counts.items())}
+
+
 def collect(files):
     table, sessions = {}, 0
     for path in files:
@@ -69,10 +86,12 @@ def main(argv=None):
     parser.add_argument("paths", nargs="+", help="timing.jsonl files or folders that contain them")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
-    table, sessions = collect(find(args.paths))
+    files = list(find(args.paths))
+    table, sessions = collect(files)
     rows = summarise(table)
+    reuse = reuse_rates(files)
     if args.json:
-        print(json.dumps({"sessions": sessions, "rows": rows}, ensure_ascii=False, indent=1))
+        print(json.dumps({"sessions": sessions, "rows": rows, "connection_reuse": reuse}, ensure_ascii=False, indent=1))
     elif not rows:
         print("没有找到耗时记录（需要新版 App 录的会议）", file=sys.stderr)
         return 1
@@ -81,6 +100,8 @@ def main(argv=None):
         print(f"{'阶段':<9}{'指标':<24}{'次数':>6}{'p50':>9}{'p90':>9}{'最大':>9}  (毫秒)")
         for row in rows:
             print(f"{row['stage']:<9}{row['field']:<24}{row['n']:>6}{row['p50']:>9.0f}{row['p90']:>9.0f}{row['max']:>9.0f}")
+        for path, seen in reuse.items():
+            print(f"连接复用 {path}: {seen['reused']}/{seen['calls']}")
     return 0
 
 

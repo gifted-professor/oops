@@ -92,6 +92,11 @@ object OopsEngine {
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(10, TimeUnit.SECONDS)
         .callTimeout(10, TimeUnit.SECONDS)
+        // Per-request network phases for the calls that decide how fast a name or tag appears.
+        .eventListenerFactory {
+            com.oops.app.backend.NetTimer({ p -> p.startsWith("/v1/speaker") || p == "/v1/utterances" || p.startsWith("/v1/actions/draft") },
+                { path, fields -> timing(sessionId, path, "net", *fields.map { it.key to it.value }.toTypedArray()) })
+        }
         .build()
 
     /** The ASR socket can stay silent through long pauses: no read timeout. */

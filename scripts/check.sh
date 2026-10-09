@@ -31,11 +31,13 @@ python3 scripts/test_latency_report.py
 python3 scripts/test_task_eval.py
 python3 scripts/test_archive_to_eval.py
 python3 scripts/test_filler_report.py
+python3 scripts/test_jev_budget.py
+python3 scripts/test_meetings_overview.py
 VOICE_PYTHON=${OOPS_VOICE_PYTHON:-"$ROOT/.venv-voice/bin/python"}
 if [ ! -x "$VOICE_PYTHON" ]; then VOICE_PYTHON=python3; fi
 "$VOICE_PYTHON" -m unittest discover -s scripts -p 'test_speaker_validation.py'
 python3 -m unittest discover -s scripts -p 'test_speaker_acceptance.py'
 python3 -m py_compile scripts/meeting_features.py scripts/notice_probe.py scripts/recordings.py scripts/task_resolver.py
-python3 -m py_compile scripts/latency_report.py scripts/task_eval.py scripts/archive_to_eval.py scripts/filler_report.py scripts/asr_words_probe.py deploy/live-speed-upgrade.py
+python3 -m py_compile scripts/latency_report.py scripts/task_eval.py scripts/archive_to_eval.py scripts/filler_report.py scripts/meetings_overview.py scripts/asr_words_probe.py deploy/live-speed-upgrade.py
 sh -n deploy/mac/oops-archive-pull.sh
 python3 -m py_compile scripts/speaker_attribution.py scripts/speaker_validation.py scripts/speaker_acceptance.py deploy/speaker-attribution-upgrade.py

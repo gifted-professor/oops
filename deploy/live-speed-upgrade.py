@@ -80,6 +80,10 @@ def service_token():
     return environment['OOPS_API_TOKEN']
 
 
+def strip(health):
+    return {k: v for k, v in health.items() if k != 'jev_stats'}
+
+
 def wait_healthy(token):
     for _ in range(30):
         try:
@@ -129,7 +133,7 @@ def apply(release, manifest, token, before, stamp):
         subprocess.run(['systemctl', 'restart', 'oops-backend'], check=True)
         after = wait_healthy(token)
         for key in before:
-            if after.get(key) != before[key]:
+            if key != 'jev_stats' and after.get(key) != before[key]:  # counters restart with the process
                 raise RuntimeError('Capability changed after restart: ' + key)
         if validation.exists():
             subprocess.run(['runuser', '-u', 'oops', '--', 'test', '-r', str(validation)], check=True)
@@ -147,7 +151,7 @@ def apply(release, manifest, token, before, stamp):
                 if original.exists():
                     shutil.copy2(original, APP / name)
             subprocess.run(['systemctl', 'restart', 'oops-backend'], check=True)
-            assert wait_healthy(token) == before
+            assert strip(wait_healthy(token)) == strip(before)
             print('ROLLED BACK source; original environment/state retained', flush=True)
         raise
 

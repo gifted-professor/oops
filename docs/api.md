@@ -199,7 +199,7 @@ POST /v1/speaker/split   {"session_id":"session-example","utterance_id":"u2"}
 
 不重传音频。服务器最多等 8 秒：算完返回 `done`；仍在算返回 `pending`，App 再问一次（最多 3 次）；从未提交、已被淘汰（最近 256 条）、计算失败或排队超过 16 条返回 `unavailable`，App 保留整句标签。`trial_segments` 与同步模式逐字段相同。App 收到后只更新这一行的拆分字段，不改整句名字，也不同步、不进入负责人判断。
 
-`/v1/speaker` 响应另带 `timing_ms`（`identify_ms`，同步模式还有 `split_ms`）。相同的 `session_id + utterance_id + 音频哈希 + 模式` 重试直接命中服务器缓存，不重新计算。`/v1/utterances` 的响应带 `timing_ms.jev_ms/clause_ms`，`/v1/actions/draft` 带 `timing_ms.deepseek_ms`；这些字段仅供量延迟，App 不依赖。
+`/v1/speaker` 响应另带 `timing_ms`（`identify_ms`，同步模式还有 `split_ms`）。相同的 `session_id + utterance_id + 音频哈希 + 模式` 重试直接命中服务器缓存，不重新计算。`/v1/utterances` 的响应带 `timing_ms.jev_ms/clause_ms`，`/v1/actions/draft` 带 `timing_ms.deepseek_ms`；这些字段仅供量延迟，App 不依赖。`/healthz` 另带 `jev_stats`（自进程启动：`calls/retries/failures/tag_fallbacks`），打标签时 Jev 失败会在 7 秒总预算内重试一次（超时、429、5xx 才重试，4xx 不重试），仍失败才退回关键词规则并计入 `tag_fallbacks`。
 
 ## 本场承诺索引
 

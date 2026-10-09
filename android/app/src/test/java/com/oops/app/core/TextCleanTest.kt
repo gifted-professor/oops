@@ -20,8 +20,15 @@ class TextCleanTest {
     }
 
     @Test
+    fun `a number spoken in Chinese digits is joined too`() {
+        assertEquals("18118554702", TextClean.display("幺八幺。嗯。一八五五。嗯。四七零二"))
+        assertEquals("号码是17818554702，对吧", TextClean.display("号码是178，幺八五五，4702，对吧"))
+        assertEquals("18118554702", TextClean.display("幺八幺一八五五四七零二"))
+    }
+
+    @Test
     fun `numbers that are not one mobile number are left alone`() {
-        listOf("100。200。300", "2026年。10月", "报价 1234。5678", "178。1855。47021", "21855。4702。178", "只说了178。")
+        listOf("100。200。300", "2026年。10月", "二零二六年。十月", "一二三四五六七八九零一二", "幺八幺。一八五五", "报价 1234。5678", "178。1855。47021", "21855。4702。178", "只说了178。")
             .forEach { assertEquals(it, TextClean.display(it)) }
     }
 }
