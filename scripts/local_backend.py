@@ -2021,7 +2021,10 @@ def main():
     p.add_argument("--no-jev", action="store_true", help="只用规则，不调用 Jev")
     p.add_argument("--no-deepseek", action="store_true", help="不做上下文任务补全")
     p.add_argument("--lark-cli", help="lark-cli 路径")
-    p.add_argument("--speaker-accept", type=float, default=0.5, help="声纹相似度低于此值判为未知")
+    # 0.42 (was 0.50): on a labelled meeting (77 single-speaker sentences, Mac mic) it lifts naming coverage from 59% to 81%
+    # with the same single wrong name, as long as the top-2 margin stays 0.05. Provisional until a held-out meeting confirms it.
+    p.add_argument("--speaker-accept", type=float, default=float(os.environ.get("OOPS_SPEAKER_ACCEPT", "0.42")),
+                   help="声纹相似度低于此值判为未知")
     p.add_argument("--speaker-margin", type=float, default=0.05, help="第一名需领先第二名的相似度")
     p.add_argument('--speaker-preview', action='store_true', default=os.environ.get('OOPS_SPEAKER_PREVIEW') == '1',
                    help='启用实时换人/重叠试验预览；不改变正式分段与负责人验收状态')

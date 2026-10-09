@@ -231,7 +231,7 @@ POST /v1/speaker/split   {"session_id":"session-example","utterance_id":"u2"}
 
 重复提交同一成员的 `sample_id` 返回原保存结果，不重复更新；版本不符拒绝。网页使用本人 `profile_revision`，不同成员可从同一次目录读取结果分别保存；同一人的过期版本仍拒绝覆盖。App 继续支持全局 `revision`。保存/删除使已有拆分及 self 自动填人验收失效；不能用历史 DJI 验收打开新注册声纹的闸门。
 
-`POST /v1/voiceprints/test` 输入 `sample_rate:16000/pcm_base64`（0.5–30 秒），只返回 `speaker/closest/score/margin/reason/scores/accept/required_margin/quality`，不更改声纹。`quality` 含 `seconds/active_seconds/clipped_ratio`。匹配门槛仍为原配置，未为了录入降低阈值。
+`POST /v1/voiceprints/test` 输入 `sample_rate:16000/pcm_base64`（0.5–30 秒），只返回 `speaker/closest/score/margin/reason/scores/accept/required_margin/quality`，不更改声纹。`quality` 含 `seconds/active_seconds/clipped_ratio`。整句匹配门槛自 2026-10-09 起默认 0.42（`OOPS_SPEAKER_ACCEPT` 可改），前两名差距仍要求 ≥0.05；依据是一场人工标注会议（Mac 收音，77 句单人说话）上覆盖率从 59% 升到 81%，错名数不变，暂定，待保留场次确认。
 
 `POST /v1/voiceprints/delete` 输入 `name/confirm:true/expected_revision`，App 服务凭据才允许删除。删除后重启不会恢复 seed 声纹；全部删除后仍可再次录入。
 
