@@ -6,7 +6,8 @@ const vm = require('node:vm');
 
 const elements = new Map();
 const element = id => {
-  if (!elements.has(id)) elements.set(id, { id, dataset: {}, style: {}, classList: { toggle() {} },
+  if (!elements.has(id)) elements.set(id, { id, dataset: {}, style: { setProperty() {} }, classList: { toggle() {}, add() {}, remove() {} },
+    setAttribute() {}, appendChild() {}, querySelectorAll: () => [],
     listeners: {}, addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); } });
   return elements.get(id);
 };

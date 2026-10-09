@@ -67,7 +67,7 @@ python3 -m http.server 8765 --bind 127.0.0.1 --directory android/app/src/main/as
 ```
 打开 `http://127.0.0.1:8765/web/index.html`，`.claude/launch.json` 有同一启动配置。桥模拟器只在没有 Android 原生桥时生效；字幕时码采用内置 WAV 的真机 ASR 观察。浏览器会播放真实 WAV、模拟召回和 Mock 行动；保存列表留在当前浏览器 localStorage，未调用云端。
 
-`?theme=light` / `?theme=dark` 可用于 375×812 预览；默认跟随系统。
+页面按设计原型（`proto.css` 原样引用，图标、Logo、字体一并放在 `web/` 下）只有浅色主题。`?frame=ios` 按原型的 iPhone 尺寸留出 54px 状态栏和 34px 底部安全区，便于和原型截图逐像素对照。
 
 ## 真实录音测试素材
 
