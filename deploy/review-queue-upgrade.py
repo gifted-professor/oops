@@ -2,7 +2,8 @@
 """Deploy the review release (per-sentence reviews, review queue, recording clips, Feishu task list).
 
 On the Mac, inside the repo (builds the release directory; changes nothing else):
-    python3 deploy/review-queue-upgrade.py build /tmp/review-release [--baseline-rev 0e3e865]
+    python3 deploy/review-queue-upgrade.py build /tmp/review-release [--baseline-rev <commit now live>]
+    (0e3e865 for the first review release; 5e17017 for the meeting-title update on top of it)
 On the HK host as root, after uploading that directory:
     python3 review-queue-upgrade.py /opt/oops/releases/review             # preflight only
     python3 review-queue-upgrade.py /opt/oops/releases/review --apply     # back up, replace, restart, verify, or roll back
@@ -98,7 +99,7 @@ def smoke(token, stamp):
     request('/v1/meetings/review', dict(session_id=missing, utterance_id='u1', speaker='other'), token, expected=404)
     request(f'/v1/recordings/{missing}/clip?start_ms=0&end_ms=500', token=token, expected=404)
     listing = request('/v1/meetings?limit=5', token=token)
-    assert all('review_pending' in item for item in listing['items']), listing
+    assert all('review_pending' in item and 'title_source' in item for item in listing['items']), listing
     queue = None
     if listing['items']:
         opened = request('/v1/meetings/' + listing['items'][0]['session_id'], token=token)

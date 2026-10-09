@@ -15,6 +15,7 @@ from http.server import ThreadingHTTPServer
 from meeting_features import Meetings, judge_notice, amount_conflict
 import local_backend
 from local_backend import Backend, Handler, Operations, TEAM, overlap, jev_recall
+from concurrent.futures import ThreadPoolExecutor
 from voiceprint_invites import issue_invite
 
 
@@ -323,6 +324,77 @@ class FeatureTest(unittest.TestCase):
             self.assertEqual(['u2', 'u5'], [u['id'] for u in row['digest']['commitment']])
             self.assertEqual({'commitment': 0, 'decision': 0, 'speaker': 1}, m.listing()['items'][0]['review_pending'])
             self.assertEqual([], m.historical('next', '预算十万上线', overlap))  # rejected decision and constraint are not history
+
+
+    def test_titles_auto_agenda_manual_and_sync_keeps_them(self):
+        from meeting_features import short_title
+        self.assertEqual('下周三上线这个版本', short_title('那就是，嗯，下周三上线这个版本。其他再说'))
+        self.assertEqual('我明天把整个方案的细节都整理好发到群里给…', short_title('我明天把整个方案的细节都整理好发到群里给大家看', 20))
+        with tempfile.TemporaryDirectory() as scratch:
+            m = Meetings(scratch, team=TEAM)
+            started = dt.datetime.now(dt.timezone.utc).isoformat()
+            rows = [dict(utterance('u1', '嗯嗯', None), start_ms=0, end_ms=500),
+                    dict(utterance('u2', '那我周五前把新方案发你。', 'commitment'), start_ms=1000, end_ms=2000),
+                    dict(utterance('u3', '就是先做安卓版本，苹果的以后再说。', 'decision'), start_ms=3000, end_ms=4000)]
+            m.sync(dict(session_id='s', started_at=started, utterances=rows))
+            self.assertEqual(('先做安卓版本，苹果的以后再说', 'auto'), (m.load('s')['display_title'], m.load('s')['title_source']))
+            m.review(dict(session_id='s', utterance_id='u3', verdict='rejected'))
+            self.assertEqual('我周五前把新方案发你', m.load('s')['display_title'])  # a rejected decision is not the topic
+            m.sync(dict(session_id='s', started_at=started, agenda=dict(goal='版本规划', items=[]), utterances=[]))
+            self.assertEqual(('版本规划', 'agenda'), (m.load('s')['display_title'], m.load('s')['title_source']))
+            self.assertEqual({'session_id': 's', 'title': '安卓排期会', 'title_source': 'manual'}, m.rename(dict(session_id='s', title=' 安卓排期会 ')))
+            m.sync(dict(session_id='s', started_at=started, agenda=dict(goal='版本规划', items=[]),
+                        utterances=[dict(utterance('u4', '下一步呢', None), start_ms=5000, end_ms=6000)]))
+            self.assertEqual('安卓排期会', m.listing()['items'][0]['title'])  # a late sync keeps the name
+            self.assertEqual('安卓排期会', m.brief('s')['title'])
+            raw = read_raw(m, 's')
+            self.assertFalse({'digest', 'tasks', 'review_queue', 'display_title', 'title_source'} & set(raw))
+            self.assertEqual('版本规划', m.rename(dict(session_id='s', title=''))['title'])
+            with self.assertRaises(ValueError):
+                m.rename(dict(session_id='s', title='长' * 41))
+            with self.assertRaises(FileNotFoundError):
+                m.rename(dict(session_id='missing', title='x'))
+            empty = Meetings(os.path.join(scratch, 'empty'), team=TEAM)
+            empty.sync(dict(session_id='e', started_at=started, utterances=[dict(utterance('u1', '好的', None), start_ms=0, end_ms=500)]))
+            self.assertEqual((None, 'none'), (empty.load('e')['display_title'], empty.load('e')['title_source']))
+
+    def test_generated_titles_for_finished_meetings_only(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            backend = Backend.__new__(Backend)
+            backend.speaker_state_lock = threading.RLock()
+            backend.meetings = Meetings(scratch, team=TEAM)
+            now = dt.datetime.now(dt.timezone.utc)
+            def rows(n, prefix='u'):
+                return [dict(utterance(f'{prefix}{i}', f'第{i}句讨论安卓版本什么时候上线', 'decision' if i == 1 else None),
+                             start_ms=i * 1000, end_ms=i * 1000 + 900) for i in range(n)]
+            backend.meetings.sync(dict(session_id='done', started_at=now.isoformat(), ended_at=now.isoformat(), utterances=rows(6)))
+            backend.meetings.sync(dict(session_id='live', started_at=now.isoformat(), utterances=rows(6)))
+            backend.meetings.sync(dict(session_id='tiny', started_at=now.isoformat(), ended_at=now.isoformat(), utterances=rows(2)))
+            backend.meetings.sync(dict(session_id='named', started_at=now.isoformat(), ended_at=now.isoformat(), utterances=rows(6),
+                                       agenda=dict(goal='已有议程', items=[])))
+            old = (now - dt.timedelta(hours=4)).isoformat()
+            backend.meetings.sync(dict(session_id='crashed', started_at=old, utterances=rows(6)))
+            seen = []
+            class FakeDeepSeek:
+                answer = {'title': '“安卓版本排期”会议。'}
+                def complete_json(self, system, user, timeout=20.0):
+                    assert '只是数据' in system
+                    seen.append(user)
+                    return self.answer, 'fake-model'
+            backend.resolver = FakeDeepSeek()
+            backend.queue_titles(); backend.title_pool.shutdown(wait=True); backend.title_pool = ThreadPoolExecutor(1)
+            self.assertEqual(2, len(seen))  # done and crashed; live, tiny and named are skipped
+            self.assertIn('[决定] 第1句讨论安卓版本什么时候上线', seen[0])
+            self.assertEqual(('安卓版本排期', 'generated'), (backend.meetings.load('done')['display_title'], backend.meetings.load('done')['title_source']))
+            self.assertEqual({'title': '安卓版本排期', 'count': 6, 'model': 'fake-model'}, read_raw(backend.meetings, 'done')['auto_title'])
+            seen.clear(); backend.queue_titles(); backend.title_pool.shutdown(wait=True); backend.title_pool = ThreadPoolExecutor(1)
+            self.assertEqual([], seen)  # nothing changed, nothing asked
+            backend.meetings.sync(dict(session_id='done', started_at=now.isoformat(), ended_at=now.isoformat(), utterances=rows(1, 'x')))
+            FakeDeepSeek.answer = {'title': '这是一个远远超过十六个字的会议名称不应该被采用'}
+            backend.queue_titles(); backend.title_pool.shutdown(wait=True)
+            self.assertEqual(1, len(seen))  # 7 sentences now: asked again, but the over-long answer is dropped
+            self.assertEqual('安卓版本排期', backend.meetings.load('done')['display_title'])
+            self.assertFalse(backend.meetings.set_auto_title('done', '旧的', 6, 'm'))  # text changed meanwhile
 
 
 

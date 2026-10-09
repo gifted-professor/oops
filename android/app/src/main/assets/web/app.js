@@ -111,6 +111,7 @@
       case 'history.open': historyOpen(p); break;
       case 'history.delete': toast('会议文字已删除'); if (S.pane === 'history') closeSheet(); send('history.list'); break;
       case 'history.search': historySearch(p); break;
+      case 'history.renamed': onRenamed(p); break;
       case 'speaker.corrected': onSpeakerCorrected(p); break;
       case 'review.saved': onReviewSaved(p); break;
       case 'tasks.list': S.tasks = { ...S.tasks, items: p.items || [] }; if (S.tab === 'tasks') renderTasks(); break;
@@ -458,6 +459,16 @@
     if (u) u.review = p.review || undefined;
   }
 
+  function renameHtml() {
+    const h = S.history, source = { manual: '手动命名', agenda: '议程目标', generated: 'AI 概括', auto: '按原话自动取', none: '' }[h.title_source] || '';
+    if (S.sheet.renaming) {
+      return `<label class="field"><span>会议名称（留空恢复自动名称）</span><input id="rename-input" maxlength="40" value="${esc(h.title_source === 'manual' ? h.display_title : '')}" placeholder="${esc(h.display_title || '例如：安卓版本排期')}"></label>
+        <div class="row"><button class="chip ghost" data-act="rename-cancel">取消</button><button class="chip" data-act="rename-save">保存名称</button></div>`;
+    }
+    return `<p class="page-title meeting-title">${esc(meetingName(h))}</p>
+      <div class="row"><span class="fine">${esc(source)}</span><button class="chip ghost" data-act="rename-start">改名</button></div>`;
+  }
+
   function historyTranscriptHtml() {
     const h = S.history;
     const rows = (h.utterances || []).filter((u) => (u.text || '').trim());
@@ -494,7 +505,7 @@
         return `<button class="cand task-row" data-act="task-open" data-url="${esc(i.url || '')}"><span><span class="t">${esc(i.what)}</span>
           <span class="meta">${esc(i.who || '负责人待定')}${due ? ' · 截止 ' + esc(due) : ''} · <span class="task-state state-${esc(i.overdue ? 'overdue' : i.feishu?.state || 'open')}">${state}</span>${i.feishu?.stale ? ' · 可能不是最新' : ''}</span>
           ${i.quote ? `<span class="meta">“${esc(i.quote)}”</span>` : ''}
-          ${i.meeting ? `<span class="meta">${esc(formatDate(i.meeting.started_at))}${i.meeting.goal ? ' · ' + esc(i.meeting.goal) : ''}</span>` : ''}</span></button>`;
+          ${i.meeting ? `<span class="meta">${esc(formatDate(i.meeting.started_at))}${i.meeting.title || i.meeting.goal ? ' · ' + esc(i.meeting.title || i.meeting.goal) : ''}</span>` : ''}</span></button>`;
       }).join('') || '<p class="fine">没有符合条件的任务。</p>'}</div>`;
     return `<p class="page-title">任务</p>
       <div class="row">${tab('tasks-scope', 'mine', t.mine ? 'mine' : 'all', '我的' + (S.state.selfName ? `（${esc(S.state.selfName)}）` : ''))}${tab('tasks-scope', 'all', t.mine ? 'mine' : 'all', '全部')}</div>
@@ -606,9 +617,10 @@
         return `<button class="cand" data-act="${readonly ? 'history-quote' : 'commitment-open'}" data-id="${esc(u.id)}"><span><span class="t">${esc(u.text)}</span><span class="meta">${clock(u.startMs ?? u.start_ms)}${u.speaker ? ' · ' + esc(speakerLabel(u.speaker)) : ''}${hint ? '<br>' + esc(hint) : ''}${u.audioExpired || readonly ? ' · 原声未保留' : ''}</span></span></button>`;
       }).join('') || '<p class="fine">暂无</p>'}</div>${ideas && rows.length > 5 && !S.showAllIdeas ? '<button class="chip ghost" data-act="ideas-all">展开全部想法</button>' : ''}`;
     }
-    return `${sheetHead(readonly ? '往期会议 · ' + formatDate(S.history.started_at) : '本场纪要')}
+    return `${sheetHead(readonly ? formatDate(S.history.started_at) : '本场纪要')}
       ${!readonly && S.state.tagsSupported === false ? '<p class="fine">当前后端不支持标签分析。</p>' : ''}
       ${!readonly && S.state.sessionTruncated ? '<p class="fine">文字索引已达上限，较早条目已移出。</p>' : ''}
+      ${readonly ? renameHtml() : ''}
       ${group('决定', summary.decisions || [])}${group('待办', summary.commitments || [], true)}${group('约束', summary.constraints || [])}${group('想法', summary.ideas || [], false, true)}
       <p class="section-title">提醒记录</p>${noticeRecordsHtml(summary.notices || [], readonly)}
       ${readonly && S.history.review_queue?.length ? `<button class="btn primary" data-act="review-start" data-id="${esc(S.history.session_id)}">会后核对 · ${S.history.review_queue.length} 条</button>` : ''}
@@ -1058,7 +1070,16 @@
       `<div class="cands">${historyRowsHtml(items)}</div>
       <p class="footnote">团队共享。会议文字与原始录音长期保留在团队服务器，删除会议时一并删除。</p>`;
   }
-  const historyRowsHtml = (items) => items.map(i => `<button class="cand" data-act="history-open" data-id="${esc(i.session_id)}"><span class="t">${esc(i.goal || '会议')}</span><span class="meta">${esc(formatDate(i.started_at))} · ${i.utterance_count} 句${reviewPending(i) ? ` · <span class="manual-name">待核对 ${reviewPending(i)}</span>` : ''}</span></button>`).join('') || '<p class="fine">还没有同步的会议文字。</p>';
+  const meetingName = (m) => m.title || m.display_title || m.goal || '会议';
+  function onRenamed(p) {
+    if (S.history?.session_id === p.session_id) { S.history.display_title = p.title; S.history.title_source = p.title_source; }
+    const item = (S.historyItems || []).find((i) => i.session_id === p.session_id);
+    if (item) { item.title = p.title; item.title_source = p.title_source; }
+    if (S.sheet?.kind === 'historyDigest') { S.sheet.renaming = false; renderSheet(); }
+    if (S.pane === 'history' && S.historyItems) renderHistoryPane();
+    toast(p.title_source === 'manual' ? '已改名' : '已恢复自动名称');
+  }
+  const historyRowsHtml = (items) => items.map(i => `<button class="cand" data-act="history-open" data-id="${esc(i.session_id)}"><span class="t">${esc(meetingName(i))}</span><span class="meta">${esc(formatDate(i.started_at))} · ${i.utterance_count} 句${reviewPending(i) ? ` · <span class="manual-name">待核对 ${reviewPending(i)}</span>` : ''}</span></button>`).join('') || '<p class="fine">还没有同步的会议文字。</p>';
   function historyHtml() {
     return `${sheetHead('往期会议 · 团队文字存档')}${historyTabs()}
       ${historyRowsHtml(S.sheet.items || [])}
@@ -1168,6 +1189,9 @@
       else send('clip.remote', { key, sessionId: p.sessionId, startMs: p.startMs, endMs: p.endMs });
     },
     'history-transcript': () => openSheet({ kind: 'historyTranscript' }),
+    'rename-start': () => { S.sheet.renaming = true; renderSheet(); $('rename-input')?.focus(); },
+    'rename-cancel': () => { S.sheet.renaming = false; renderSheet(); },
+    'rename-save': () => send('history.rename', { sessionId: S.history.session_id, title: $('rename-input').value.trim() }),
     'review-start': (el) => { S.pendingReview = el.dataset.id; openSheet({ kind: 'pending' }); send('history.open', { sessionId: el.dataset.id }); },
     'review-verdict': (el) => reviewVerdict(el.dataset.value),
     'review-owner': (el) => reviewOwner(el.dataset.name),

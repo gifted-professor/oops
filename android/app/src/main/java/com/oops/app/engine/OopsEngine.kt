@@ -1752,6 +1752,19 @@ object OopsEngine {
     private fun corrected(session: String, id: String, speaker: String?, status: String) = JSONObject()
         .put("sessionId", session).put("utteranceId", id).put("speaker", speaker ?: JSONObject.NULL).put("status", status)
 
+    fun renameMeeting(session: String, title: String) {
+        require(title.trim().length <= 40) { "会议名称最多 40 个字" }
+        val client = api
+        scope.launch {
+            try {
+                val result = client.renameMeeting(session, title.trim())
+                if (result == null) fail("history", "当前后端不支持改会议名称")
+                else emit(OopsEvent.Json("history.renamed", result))
+            } catch (error: CancellationException) { throw error }
+            catch (error: Exception) { fail("history", "改名没有保存：${error.message}") }
+        }
+    }
+
     /** Plays a sentence from the server's archive (a past meeting, or this one once its recording is uploaded). */
     fun playRemoteClip(key: String, session: String, startMs: Long, endMs: Long) {
         val client = api

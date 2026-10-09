@@ -218,6 +218,43 @@ def judge_notice(req, jev, overlap, history=()):
     raise ValueError('提醒类型无效')
 
 
+FILLER_START = re.compile(r'^(?:那么?|就是|嗯+|呃+|啊|哎|对+|好+|然后|所以|其实|我觉得)[，,、。\s]*')
+
+
+def short_title(text, limit=18):
+    """One clause of a sentence, without the spoken lead-in, short enough for a list row."""
+    value = text.strip()
+    while True:
+        trimmed = FILLER_START.sub('', value, count=1)
+        if trimmed == value or not trimmed:
+            break
+        value = trimmed
+    value = re.split(r'[。！？!?；;]', value)[0].strip('，,、 ')
+    return value[:limit] + '…' if len(value) > limit else value
+
+
+def meeting_title(row):
+    """(title, source): a person's name for it, the agenda goal, or a sentence that says what it was about."""
+    if row.get('title'):
+        return row['title'], 'manual'
+    goal = (row.get('agenda') or {}).get('goal', '').strip()
+    if goal:
+        return goal, 'agenda'
+    generated = row.get('auto_title') or {}
+    if generated.get('title'):
+        return generated['title'], 'generated'
+    for tag in ('decision', 'commitment', 'constraint'):
+        picks = sorted(row['digest'][tag], key=lambda u: u.get('review', {}).get('verdict') != 'confirmed')
+        for u in picks:
+            title = short_title(u['text'])
+            if len(title) >= 4:
+                return title, 'auto'
+    longest = max(row['utterances'], key=lambda u: len(u['text']), default=None)
+    if longest and len(short_title(longest['text'])) >= 4:
+        return short_title(longest['text']), 'auto'
+    return None, 'none'
+
+
 def review_queue(utterances):
     """What a person should check after the meeting, most consequential first: tasks, decisions, then unknown speakers."""
     tasks, decisions, speakers = [], [], []
@@ -294,6 +331,7 @@ class Meetings:
                 u['task_status'] = task['status'] if task else None
                 u['task_url'] = (task.get('feishu_task') or {}).get('url') if task else None
             row['review_queue'] = review_queue(row['utterances'])
+            row['display_title'], row['title_source'] = meeting_title(row)
             return row
 
     def sync(self, req):
@@ -328,7 +366,8 @@ class Meetings:
                 if started is None:
                     raise ValueError('缺少开始日期')
                 row = dict(session_id=sid, started_at=started, time_zone=zone, utterances=[], notices=[])
-            row.pop('digest', None); row.pop('tasks', None)
+            for derived in ('digest', 'tasks', 'review_queue', 'display_title', 'title_source'):
+                row.pop(derived, None)
             if started and started != row['started_at']:
                 raise ValueError('会议开始日期不可变')
             if req.get('ended_at'):
@@ -383,13 +422,69 @@ class Meetings:
             self.write(sid, row)
             return dict(session_id=sid, utterance_id=uid, review=reviews.get(uid))
 
+    def rename(self, req):
+        """A person's name for the meeting; an empty title goes back to the automatic one."""
+        sid = identifier(req.get('session_id'))
+        title = text(req.get('title', ''), 200).strip()
+        if len(title) > 40:
+            raise ValueError('会议名称最多 40 个字')
+        with self.lock:
+            path = self.path(sid)
+            if os.path.exists(path + '.deleted') or not os.path.isfile(path):
+                raise FileNotFoundError(sid)
+            row = read_json(path)
+            if title:
+                row['title'] = title
+            else:
+                row.pop('title', None)
+            self.write(sid, row)
+        loaded = self.load(sid)
+        return dict(session_id=sid, title=loaded['display_title'], title_source=loaded['title_source'])
+
+    TITLE_MIN_UTTERANCES = 5
+
+    def title_jobs(self, now=None):
+        """Finished meetings whose generated title is missing or older than their text: (session_id, count, transcript)."""
+        now = now or dt.datetime.now(dt.timezone.utc)
+        jobs = []
+        with self.lock:
+            for name in os.listdir(self.dir):
+                if not name.endswith('.json'):
+                    continue
+                row = read_json(os.path.join(self.dir, name))
+                count = len(row['utterances'])
+                finished = row.get('ended_at') or now - timestamp(row['started_at']) > dt.timedelta(hours=3)
+                if (row.get('title') or (row.get('agenda') or {}).get('goal') or not finished
+                        or count < self.TITLE_MIN_UTTERANCES or (row.get('auto_title') or {}).get('count') == count):
+                    continue
+                rejected = {uid for uid, r in row.get('reviews', {}).items() if r.get('verdict') == 'rejected'}
+                label = {'decision': '决定', 'commitment': '待办', 'constraint': '约束'}
+                lines = [('[' + label[u['tag']] + '] ' if u.get('tag') in label and u['id'] not in rejected else '') + u['text']
+                         for u in sorted(row['utterances'], key=lambda u: u['start_ms'])]
+                jobs.append((row['session_id'], count, '\n'.join(lines)[:6000]))
+        return jobs
+
+    def set_auto_title(self, sid, title, count, model):
+        """Stored only if the text did not change while the title was being made."""
+        with self.lock:
+            path = self.path(sid)
+            if not os.path.isfile(path):
+                return False
+            row = read_json(path)
+            if len(row['utterances']) != count:
+                return False
+            row['auto_title'] = dict(title=title, count=count, model=model)
+            self.write(sid, row)
+            return True
+
     def brief(self, sid):
-        """Start time and agenda goal for labelling a task; None when the meeting is gone."""
+        """Start time and name for labelling a task (no automatic title: that needs the whole meeting); None when gone."""
         try:
             row = read_json(self.path(sid))
         except (OSError, ValueError):
             return None
-        return dict(session_id=sid, started_at=row.get('started_at'), goal=(row.get('agenda') or {}).get('goal', ''))
+        goal = (row.get('agenda') or {}).get('goal', '')
+        return dict(session_id=sid, started_at=row.get('started_at'), goal=goal, title=row.get('title') or goal or None)
 
     def listing(self, limit=30):
         if not 1 <= limit <= 100:
@@ -399,6 +494,7 @@ class Meetings:
             rows = [self.load(n[:-5]) for n in os.listdir(self.dir) if n.endswith('.json')]
             rows.sort(key=lambda r: r['started_at'], reverse=True)
             return dict(count=len(rows), items=[dict(session_id=r['session_id'], started_at=r['started_at'],
+                title=r['display_title'], title_source=r['title_source'],
                 ended_at=r.get('ended_at'), goal=(r.get('agenda') or {}).get('goal', ''),
                 utterance_count=len(r['utterances']), digest_counts={t: len(r['digest'][t]) for t in DIGEST},
                 review_pending={k: sum(q['kind'] == k for q in r['review_queue']) for k in ('commitment', 'decision', 'speaker')})

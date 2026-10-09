@@ -14,6 +14,8 @@ interface OopsApi {
     suspend fun historyDelete(id: String): org.json.JSONObject? = null
     suspend fun historySearch(query: String): org.json.JSONObject? = null
     /** A person's correction of one sentence; null when the server does not have that meeting (yet). */
+    /** A person's name for a past meeting; an empty title returns to the automatic one. */
+    suspend fun renameMeeting(sessionId: String, title: String): org.json.JSONObject? = null
     suspend fun reviewMeeting(request: org.json.JSONObject): org.json.JSONObject? = null
     /** One archived sentence as 16 kHz mono PCM, cut on the server; null when it has no recording. */
     suspend fun recordingClip(sessionId: String, startMs: Long, endMs: Long): ByteArray? = null

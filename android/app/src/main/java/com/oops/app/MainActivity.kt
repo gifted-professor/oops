@@ -204,6 +204,7 @@ class MainActivity : ComponentActivity() {
                 "history.list" -> OopsEngine.history("list")
                 "history.open" -> OopsEngine.history("open", p.getString("sessionId"))
                 "history.delete" -> OopsEngine.history("delete", p.getString("sessionId"), p.optBoolean("confirm"))
+                "history.rename" -> OopsEngine.renameMeeting(p.getString("sessionId"), p.getString("title"))
                 "history.search" -> OopsEngine.history("search", p.getString("query"))
                 "digest.open", "commitment.open" -> OopsEngine.openCommitment(p.getString("utteranceId"))
                 "clip.play" -> OopsEngine.playClip(p.getString("key"), p.getLong("startMs"), p.getLong("endMs"),

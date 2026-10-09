@@ -153,7 +153,7 @@
         const rows = sessionTranscript.filter(u => p.ids.includes(u.id));
         const card = {id: id('c'), trigger: 'conflict', single: rows.length === 1, engine: 'browser-mock', latencyMs: 0, items: rows.map(u => ({...u, prob: 1})), pool: rows}; cards.set(card.id, card); emit('recall.card', card); break;
       }
-      case 'history.list': emit('history.list', {count: mockMeetings.length, items: mockMeetings.map((m) => ({...m, review_pending: {all: reviewQueue(historicalRows).length}}))}); break;
+      case 'history.list': emit('history.list', {count: mockMeetings.length, items: mockMeetings.map((m) => ({...m, title: m.manualTitle || m.goal, review_pending: {all: reviewQueue(historicalRows).length}}))}); break;
       case 'history.open': {
         if (p.sessionId === state.sessionId) {
           const rows = sessionTranscript.map((u) => ({id: u.id, text: u.text, start_ms: u.startMs, end_ms: u.endMs, tag: u.tag, speaker: u.speaker || null}));
@@ -161,11 +161,17 @@
             digest: {constraint: [], commitment: [], decision: [], idea: []}, notices: []});
         }
         const meeting = mockMeetings.find(i => i.session_id === p.sessionId); if (!meeting) return emit('error', {scope: 'history', message: '会议已删除'});
-        emit('history.open', {...meeting, utterances: historicalRows, review_queue: reviewQueue(historicalRows),
+        emit('history.open', {...meeting, display_title: meeting.manualTitle || meeting.goal, title_source: meeting.manualTitle ? 'manual' : 'generated', utterances: historicalRows, review_queue: reviewQueue(historicalRows),
           digest: {constraint: historicalRows.filter(u => u.tag === 'constraint'), commitment: historicalRows.filter(u => u.tag === 'commitment' && u.review?.verdict !== 'rejected'),
             decision: historicalRows.filter(u => u.tag === 'decision' && u.review?.verdict !== 'rejected'), idea: []}, notices: []}); break;
       }
       case 'history.delete': if (p.confirm) {mockMeetings = mockMeetings.filter(i => i.session_id !== p.sessionId); emit('history.delete', {deleted: true});} break;
+      case 'history.rename': {
+        const meeting = mockMeetings.find((m) => m.session_id === p.sessionId);
+        if (meeting) { meeting.manualTitle = p.title || null; }
+        const title = p.title || '上线方案评审（模拟）';
+        setTimeout(() => emit('history.renamed', { session_id: p.sessionId, title, title_source: p.title ? 'manual' : 'generated' }), 200); break;
+      }
       case 'history.search': emit('history.search', {query: p.query, engine: 'browser-mock', items: mockMeetings.length ? historicalRows.map(u => ({...u, id: 'h:demo:'+u.id, session_id: 'demo', started_at: '2026-10-06T09:00:00+08:00', prob: .9})) : []}); break;
       case 'recall.trigger': void recall(p);break;
       case 'digest.open':

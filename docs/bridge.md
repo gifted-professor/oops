@@ -15,6 +15,7 @@ H5 用 `window.OopsNative.postMessage(JSON.stringify({type,payload}))` 发送；
 | clip.stop | {} | 停止回听 |
 | clip.remote | {key,sessionId,startMs,endMs} | 从服务器存档取一句原声播放（往期会议，或本场录音上传后） |
 | speaker.correct | {sessionId,utteranceId,speaker} | 人工改说话人：团队成员、`other`/`multi`/`unclear`，`null` 撤销。本场立即改显示，再写服务器（会议还没同步到服务器时每 25 秒重试，最多 3 次）；往期会议直接写服务器 |
+| history.rename | {sessionId,title} | 往期会议改名，空字符串恢复自动名称 |
 | review.set | {sessionId,utteranceId,fields:{verdict?,owner?}} | 会后核对：是否待办/决定（confirmed/rejected）、负责人；null 清除 |
 | tasks.list | {mine,status:"open"/"done"/"all"} | 读飞书任务列表；`mine` 需要设置里选了本人 |
 | recall.save | {cardId,utteranceIds,startMs,endMs} | 明确保存原句及可用原声 |
@@ -49,6 +50,7 @@ H5 用 `window.OopsNative.postMessage(JSON.stringify({type,payload}))` 发送；
 | clip.state | {key,state:"playing"/"stopped"/"ended"/"expired"/"loading"/"unavailable"} |
 | speaker.corrected | {sessionId,utteranceId,speaker,status:"local"/"saved"}；local 是本机已改，saved 是服务器已保存 |
 | tasks.list | `GET /v1/tasks` 的结果，另加 {mine,status} |
+| history.renamed | {session_id,title,title_source} |
 | review.saved | {sessionId,utteranceId,review} 服务器已保存的核对 |
 | recall.saved | {cardId,savedCount} |
 | action.draft | {draftId,cardId,who,what,whenIso,whenRaw,constraint,assigneeCandidates,evidence} |
