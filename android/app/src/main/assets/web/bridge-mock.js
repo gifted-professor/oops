@@ -32,6 +32,15 @@
   let actions = new Map(), draftOps = new Map(), recallCount = 0, playingKey = null;
   const audio = new Audio('../test/dialog.wav');
   let clipTimer = null;
+  const day = 86400000;
+  const mockTasks = [
+    { op_id: 'op-mock-1', what: '周五前把新方案发出来', who: '洪玉麟', quote: '那我周五前把新方案发你', url: 'https://example.com/task/1',
+      meeting: { started_at: '2026-10-06T09:00:00+08:00', goal: '上线方案' }, overdue: true, feishu: { state: 'open', due_ms: Date.now() - day } },
+    { op_id: 'op-mock-2', what: '整理预算上限', who: '林春源', quote: '预算不能超过10万', url: 'https://example.com/task/2',
+      meeting: { started_at: '2026-10-06T09:00:00+08:00', goal: '上线方案' }, overdue: false, feishu: { state: 'done', due_ms: Date.now() - 2 * day } },
+    { op_id: 'op-mock-3', what: '确认体验版注册流程', who: '江古月', quote: '注册前应该先让用户体验一下产品', url: 'https://example.com/task/3',
+      meeting: null, overdue: false, feishu: { state: 'unknown', stale: true } },
+  ];
   function stopClip() {
     audio.pause(); clearTimeout(clipTimer);
     if (playingKey) emit('clip.state', { key: playingKey, state: 'stopped' });
@@ -162,6 +171,19 @@
         audio.play().catch(() => { emit('toast', { message: '浏览器未允许音频播放，请再次点击回听' });stopClip(); });
         clipTimer = setTimeout(stopClip, Math.max(100, p.endMs - p.startMs));break;
       case 'clip.stop': stopClip();break;
+      case 'clip.remote': emit('clip.state', { key: p.key, state: 'unavailable' }); emit('toast', { message: '浏览器没有服务器录音，请在 Android App 中回听' }); break;
+      case 'speaker.correct': {
+        const u = sessionTranscript.find((x) => x.id === p.utteranceId);
+        if (p.sessionId === state.sessionId && u) { u.manualSpeaker = p.speaker; emit('speaker.corrected', { ...p, status: 'local' }); }
+        const h = historicalRows.find((x) => x.id === p.utteranceId);
+        if (h) { h.review = p.speaker == null ? undefined : { speaker: p.speaker }; }
+        setTimeout(() => emit('speaker.corrected', { ...p, status: 'saved' }), 300); break;
+      }
+      case 'tasks.list': {
+        if (p.mine && !state.selfName) throw new Error('请先在设置里选择本人');
+        const all = mockTasks.filter((t) => (!p.mine || t.who === state.selfName) && (p.status === 'all' || t.feishu.state === p.status || (p.status === 'open' && t.feishu.state === 'unknown')));
+        setTimeout(() => emit('tasks.list', { items: all, mine: p.mine, status: p.status }), 300); break;
+      }
       case 'recall.dismiss': cards.delete(p.cardId);break;
       case 'recall.save': {
         const c = cards.get(p.cardId);if (!c) throw new Error('卡片已失效');
@@ -186,7 +208,7 @@
       case 'settings.set':
         state.source = p.source || state.source;state.backendUrl = p.backendBaseUrl || '';state.speakerInfo = !!p.speakerInfo;
         state.remoteAddress = p.remoteAddress || state.remoteAddress;
-        ['voiceTrigger','noticeVibrate','memorySync'].forEach(k => { if (k in p) state[k] = p[k]; });
+        ['voiceTrigger','noticeVibrate','memorySync','selfName'].forEach(k => { if (k in p) state[k] = p[k]; });
         emit('state', { ...state });emit('toast', { message: '浏览器只模拟后端；真实配置请在 Android App 中设置' });break;
       case 'testAudio.pick': emit('toast', { message: '外部 WAV 导入请在 Android App 中使用' });break;
       case 'testAudio.reset': state.testWavName = '内置合成对话（浏览器模拟）';emit('state', { ...state });break;

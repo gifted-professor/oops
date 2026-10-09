@@ -208,6 +208,10 @@ class MainActivity : ComponentActivity() {
                 "digest.open", "commitment.open" -> OopsEngine.openCommitment(p.getString("utteranceId"))
                 "clip.play" -> OopsEngine.playClip(p.getString("key"), p.getLong("startMs"), p.getLong("endMs"))
                 "clip.stop" -> OopsEngine.stopClip()
+                "clip.remote" -> OopsEngine.playRemoteClip(p.getString("key"), p.getString("sessionId"), p.getLong("startMs"), p.getLong("endMs"))
+                "speaker.correct" -> OopsEngine.correctSpeaker(p.getString("sessionId"), p.getString("utteranceId"),
+                    if (p.isNull("speaker")) null else p.getString("speaker"))
+                "tasks.list" -> OopsEngine.tasks(p.optBoolean("mine"), p.optString("status").ifBlank { "open" })
                 "recall.save" -> OopsEngine.saveRecall(
                     p.getString("cardId"), p.getJSONArray("utteranceIds").strings(), p.getLong("startMs"), p.getLong("endMs"),
                 )

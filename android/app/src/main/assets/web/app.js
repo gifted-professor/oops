@@ -36,6 +36,8 @@
     autoScroll: true,
     voiceprintName: "",
     voiceprintDelete: null,
+    team: [],
+    tasks: { mine: true, status: 'open', items: null },
   };
 
   // ---- helpers --------------------------------------------------------------------------
@@ -89,6 +91,7 @@
         applyInsets(p.insets);
         resetTranscript();
         S.state.sessionId = p.state.sessionId; // the snapshot already is this session's transcript
+        S.team = p.team || S.team;
         (p.transcript || []).forEach(addLine);
         setState(p.state);
         if (p.summary) setSummary(p.summary);
@@ -103,6 +106,8 @@
       case 'history.open': historyOpen(p); break;
       case 'history.delete': toast('会议文字已删除'); send('history.list'); break;
       case 'history.search': historySearch(p); break;
+      case 'speaker.corrected': onSpeakerCorrected(p); break;
+      case 'tasks.list': S.tasks = { ...S.tasks, items: p.items || [] }; if (S.sheet?.kind === 'tasks') renderSheet(); break;
       case 'voiceprint.open': openSheet({kind: 'voiceprint'}); break;
       case 'insets': applyInsets(p); break;
       case 'asr.partial':
@@ -312,6 +317,10 @@
     const u = S.records.get(id), li = S.lines.get(id);
     if (!u || !li) return;
     const speaker = speakerLabel(u.speaker);
+    if (u.manualSpeaker) {
+      li.querySelector('div').innerHTML = `<span class="spk spk-manual">${esc(manualLabel(u.manualSpeaker))} · 已改</span>${esc(u.display || u.text)}${TAG_LABELS[u.tag] ? ` <span class="badge value-tag">${TAG_LABELS[u.tag]}</span>` : ''}`;
+      return;
+    }
     // A joined phone number no longer matches the segments' text, so such a line is shown whole.
     const stitched = !!u.display && u.display !== u.text;
     const experiment = !stitched && !u.segments?.length && S.state.speakerPreviewEnabled && u.speakerPreview?.experimental && u.speakerPreview.segments?.length;
@@ -329,6 +338,91 @@
       }).join('') :
       `${speaker ? `<span class="spk">${esc(speaker)} · 待核对</span>` : ''}${speakerStatusHtml(u)}${esc(u.display || u.text)}`;
     li.querySelector('div').innerHTML = `${words}${TAG_LABELS[u.tag] ? ` <span class="badge value-tag">${TAG_LABELS[u.tag]}</span>` : ''}`;
+  }
+
+  // ---- who said it: a person's correction ----------------------------------------------------
+
+  const MANUAL_OTHER = { other: '其他人', multi: '多人同时说', unclear: '听不清' };
+  const manualLabel = (v) => MANUAL_OTHER[v] || speakerLabel(v);
+
+  /** live: this meeting's line (local audio); otherwise a past meeting's sentence (audio from the server). */
+  function openSpeakerPick(pick) {
+    openSheet({ kind: 'speaker', back: S.sheet?.kind === 'historyTranscript' ? 'historyTranscript' : null, ...pick });
+  }
+  function speakerPickHtml() {
+    const p = S.sheet;
+    const options = [...S.team.map((n) => [n, n]), ...Object.entries(MANUAL_OTHER)];
+    return `${sheetHead('这句是谁说的')}
+      <div class="evidence"><button data-act="speaker-play" data-key="spk-${esc(p.id)}" aria-label="回听原声">▶</button><span>“${esc(p.text)}”</span></div>
+      <p class="fine">模型判断：${esc(speakerLabel(p.model) || '未识别')}${p.current ? ` · 已改为 ${esc(manualLabel(p.current))}` : ''}</p>
+      <div class="owner-candidates">${options.map(([v, label]) => `<button class="btn ${v === p.current ? 'primary' : 'ghost'}" data-act="speaker-set" data-name="${esc(v)}">${esc(label)}</button>`).join('')}</div>
+      ${p.current ? '<button class="chip ghost" data-act="speaker-undo">撤销修改，恢复模型结果</button>' : ''}
+      <p class="footnote">改动存到团队服务器，任务草稿会改用你选的人来建议负责人（仍需确认）。</p>
+      ${p.back ? '<button class="btn ghost" data-act="speaker-back">返回全文</button>' : ''}`;
+  }
+  function setSpeakerFromPick(value) {
+    const p = S.sheet;
+    send('speaker.correct', { sessionId: p.sessionId, utteranceId: p.id, speaker: value });
+    if (p.back) openSheet({ kind: p.back });
+    else closeSheet();
+  }
+  function onSpeakerCorrected(p) {
+    if (p.sessionId === S.state.sessionId) {
+      const u = S.records.get(p.utteranceId);
+      if (u) { u.manualSpeaker = p.speaker; renderLine(p.utteranceId); }
+    }
+    if (p.status === 'saved' && S.history?.session_id === p.sessionId) {
+      const u = (S.history.utterances || []).find((x) => x.id === p.utteranceId);
+      if (u) {
+        u.review = { ...(u.review || {}), speaker: p.speaker };
+        if (p.speaker == null) delete u.review.speaker;
+      }
+      if (S.sheet?.kind === 'historyTranscript') renderSheet();
+    }
+    if (p.status === 'saved') toast(p.speaker == null ? '已恢复模型结果' : `已改为 ${manualLabel(p.speaker)}`);
+  }
+  function historyTranscriptHtml() {
+    const h = S.history;
+    const rows = (h.utterances || []).filter((u) => (u.text || '').trim());
+    return `${sheetHead('全文 · ' + formatDate(h.started_at))}
+      <p class="fine">点一句可以改说话人，▶ 从服务器取原声（会后录音上传完才有）。</p>
+      <div class="cands">${rows.map((u) => {
+        const manual = u.review?.speaker;
+        const who = manual ? `${manualLabel(manual)} · 已改` : speakerLabel(u.speaker) || '未识别';
+        return `<div class="cand transcript-row"><button class="play-mini" data-act="history-play" data-id="${esc(u.id)}" data-key="h-${esc(u.id)}" aria-label="回听原声">▶</button>
+          <button class="row-text" data-act="history-speaker" data-id="${esc(u.id)}"><span class="meta">${clock(u.start_ms)} · <span class="${manual ? 'manual-name' : ''}">${esc(who)}</span></span><span class="t">${esc(u.text)}</span></button></div>`;
+      }).join('') || '<p class="fine">这场会议没有文字。</p>'}</div>
+      <button class="btn ghost" data-act="history-back">返回纪要</button>`;
+  }
+
+  // ---- tasks --------------------------------------------------------------------------------
+
+  function openTasks() {
+    S.tasks.items = null;
+    openSheet({ kind: 'tasks' });
+    if (!S.tasks.mine || S.state.selfName) send('tasks.list', { mine: S.tasks.mine, status: S.tasks.status });
+  }
+  const TASK_STATE = { done: '已完成', deleted: '飞书里已删除', unknown: '状态未知' };
+  function tasksHtml() {
+    const t = S.tasks;
+    const tab = (act, value, current, label) => `<button class="chip ${value === current ? '' : 'ghost'}" data-act="${act}" data-value="${value}">${label}</button>`;
+    const needSelf = t.mine && !S.state.selfName;
+    const body = needSelf
+      ? `<p class="fine">先选你是谁，才能看"我的"任务：</p><div class="owner-candidates">${S.team.map((n) => `<button class="btn ghost" data-act="tasks-self" data-name="${esc(n)}">${esc(n)}</button>`).join('')}</div>`
+      : t.items == null ? spinnerHtml('正在读取飞书任务…', '状态最多缓存 5 分钟')
+      : `<div class="cands">${t.items.map((i) => {
+        const state = i.overdue ? '逾期' : TASK_STATE[i.feishu?.state] || '未完成';
+        const due = i.feishu?.due_ms ? new Date(i.feishu.due_ms).toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' }) : (i.when?.raw || '');
+        return `<button class="cand task-row" data-act="task-open" data-url="${esc(i.url || '')}"><span><span class="t">${esc(i.what)}</span>
+          <span class="meta">${esc(i.who || '负责人待定')}${due ? ' · 截止 ' + esc(due) : ''} · <span class="task-state state-${esc(i.overdue ? 'overdue' : i.feishu?.state || 'open')}">${state}</span>${i.feishu?.stale ? ' · 可能不是最新' : ''}</span>
+          ${i.quote ? `<span class="meta">“${esc(i.quote)}”</span>` : ''}
+          ${i.meeting ? `<span class="meta">${esc(formatDate(i.meeting.started_at))}${i.meeting.goal ? ' · ' + esc(i.meeting.goal) : ''}</span>` : ''}</span></button>`;
+      }).join('') || '<p class="fine">没有符合条件的任务。</p>'}</div>`;
+    return `${sheetHead('任务 · 飞书')}
+      <div class="row">${tab('tasks-scope', 'mine', t.mine ? 'mine' : 'all', '我的' + (S.state.selfName ? `（${esc(S.state.selfName)}）` : ''))}${tab('tasks-scope', 'all', t.mine ? 'mine' : 'all', '全部')}</div>
+      <div class="row">${tab('tasks-status', 'open', t.status, '未完成')}${tab('tasks-status', 'done', t.status, '已完成')}${tab('tasks-status', 'all', t.status, '全部')}</div>
+      ${body}
+      <p class="footnote">只列经你确认后由 Oops 建的飞书任务；点开在飞书里查看和完成。</p>`;
   }
 
   function setSummary(p) {
@@ -414,6 +508,9 @@
       agenda: agendaHtml,
       history: historyHtml,
       notices: () => sheetHead('提醒记录') + noticeRecordsHtml([...S.notices.values()]),
+      speaker: speakerPickHtml,
+      historyTranscript: historyTranscriptHtml,
+      tasks: tasksHtml,
     }[k];
     $('sheet').innerHTML = html ? html() : '';
     syncPlayButtons();
@@ -435,6 +532,7 @@
       ${!readonly && S.state.sessionTruncated ? '<p class="fine">文字索引已达上限，较早条目已移出。</p>' : ''}
       ${group('决定', summary.decisions || [])}${group('待办', summary.commitments || [], true)}${group('约束', summary.constraints || [])}${group('想法', summary.ideas || [], false, true)}
       <p class="section-title">提醒记录</p>${noticeRecordsHtml(summary.notices || [], readonly)}
+      ${readonly ? `<button class="btn primary" data-act="history-transcript">查看全文 · 改说话人</button>` : ''}
       ${readonly ? `<button class="btn ghost" data-act="history-delete-prompt">删除此会议文字</button>${S.sheet.deleteConfirm ? '<p class="fine">团队成员将无法再查看这场会议。确认删除？</p><button class="btn ghost" data-act="history-delete-confirm">确认删除</button>' : ''}` : '<p class="footnote">本场索引保留到下次收音。开启文字同步后可在往期会议查看；原声最多暂存 50 段。</p>'}`;
   }
 
@@ -523,6 +621,7 @@
     if (p.state === 'playing') S.playingKey = p.key;
     else if (S.playingKey === p.key) S.playingKey = null;
     if (p.state === 'expired') toast('原声已过期（只保留最近 5 分钟）', true);
+    if (p.state === 'loading') S.loadingKey = p.key; else if (S.loadingKey === p.key) S.loadingKey = null;
     syncPlayButtons();
   }
 
@@ -532,7 +631,7 @@
       const playing = S.playingKey === btn.dataset.key;
       if (btn.disabled) return;
       if (btn.dataset.act === 'play') btn.textContent = playing ? '■ 停止' : '▶ 回听原声';
-      else btn.textContent = playing ? '■' : '▶';
+      else btn.textContent = playing ? '■' : S.loadingKey === btn.dataset.key ? '…' : '▶';
     });
   }
 
@@ -683,6 +782,7 @@
       <label class="field"><span>Mac 收音地址（配合 adb reverse 用 127.0.0.1）</span><input id="set-remote" inputmode="url" placeholder="127.0.0.1:7790" value="${esc(s.remoteAddress || '127.0.0.1:7790')}"></label>
       <p class="fine">测试音频：${esc(s.testWavName || '内置合成对话')} · 需要 PCM 16kHz / 单声道 / 16bit WAV</p>
       <div class="row"><button class="chip" data-act="pick-audio">选择测试 WAV</button><button class="chip ghost" data-act="reset-audio">恢复内置音频</button></div>
+      <label class="field"><span>本人（用于"我的任务"）</span><select id="set-self"><option value="">未选择</option>${S.team.map((n) => `<option ${n === s.selfName ? 'selected' : ''}>${esc(n)}</option>`).join('')}</select></label>
       <label class="switch"><span>说「Oops」触发找回/提问</span><input type="checkbox" id="set-voice" ${s.voiceTrigger !== false ? 'checked' : ''}></label>
       <label class="switch"><span>提醒短震动</span><input type="checkbox" id="set-vibrate" ${s.noticeVibrate !== false ? 'checked' : ''}></label>
       <label class="switch"><span>会议文字自动同步</span><input type="checkbox" id="set-sync" ${s.memorySync !== false ? 'checked' : ''}></label>
@@ -777,6 +877,7 @@
       speakerInfo: $('set-spk').checked,
       speakerPreview: $('set-preview').checked,
       recordSession: $('set-record').checked,
+      selfName: $('set-self').value,
     };
     if ($('set-clear-token').checked) settings.backendToken = '';
     else if ($('set-token').value.trim()) settings.backendToken = $('set-token').value.trim();
@@ -946,6 +1047,31 @@
     'vp-delete-prompt': (el) => { S.voiceprintDelete = el.dataset.name; renderSheet(); },
     'vp-delete-confirm': () => { send('voiceprint.delete', {name: S.voiceprintDelete, confirm: true}); S.voiceprintDelete = null; },
     'apply-settings': applySettings,
+    'speaker-set': (el) => setSpeakerFromPick(el.dataset.name),
+    'speaker-undo': () => setSpeakerFromPick(null),
+    'speaker-back': () => openSheet({ kind: S.sheet.back }),
+    'speaker-play': () => {
+      const p = S.sheet, key = `spk-${p.id}`;
+      if (S.playingKey === key) send('clip.stop');
+      else if (p.live) send('clip.play', { key, startMs: p.startMs, endMs: p.endMs });
+      else send('clip.remote', { key, sessionId: p.sessionId, startMs: p.startMs, endMs: p.endMs });
+    },
+    'history-transcript': () => openSheet({ kind: 'historyTranscript' }),
+    'history-back': () => openSheet({ kind: 'historyDigest' }),
+    'history-speaker': (el) => {
+      const u = S.history.utterances.find((x) => x.id === el.dataset.id);
+      if (u) openSpeakerPick({ live: false, sessionId: S.history.session_id, id: u.id, text: u.text, model: u.speaker,
+        current: u.review?.speaker || null, startMs: u.start_ms, endMs: u.end_ms });
+    },
+    'history-play': (el) => {
+      const u = S.history.utterances.find((x) => x.id === el.dataset.id), key = `h-${el.dataset.id}`;
+      if (S.playingKey === key) send('clip.stop');
+      else if (u) send('clip.remote', { key, sessionId: S.history.session_id, startMs: u.start_ms, endMs: u.end_ms });
+    },
+    'tasks-scope': (el) => { S.tasks.mine = el.dataset.value === 'mine'; openTasks(); },
+    'tasks-status': (el) => { S.tasks.status = el.dataset.value; openTasks(); },
+    'tasks-self': (el) => { send('settings.set', { selfName: el.dataset.name }); S.state.selfName = el.dataset.name; openTasks(); },
+    'task-open': (el) => { if (el.dataset.url) send('open.url', { url: el.dataset.url }); },
     'pick-audio': () => send('testAudio.pick'),
     'reset-audio': () => send('testAudio.reset'),
   };
@@ -987,6 +1113,13 @@
   $('btn-saved').addEventListener('click', () => send('saved.list'));
   $('btn-commitments').addEventListener('click', () => openSheet({ kind: 'commitments' }));
   $('btn-settings').addEventListener('click', () => openSheet({ kind: 'settings' }));
+  $('btn-tasks').addEventListener('click', openTasks);
+  $('lines').addEventListener('click', (e) => {
+    const li = e.target.closest('li[data-id]');
+    const u = li && S.records.get(li.dataset.id);
+    if (u) openSpeakerPick({ live: true, sessionId: S.state.sessionId, id: u.id, text: u.display || u.text, model: u.speaker,
+      current: u.manualSpeaker || null, startMs: u.startMs, endMs: u.endMs });
+  });
 
   send('hello');
 })();

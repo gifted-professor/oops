@@ -104,6 +104,12 @@ class SessionIndex(
             speakerCandidates = speakerCandidates, trialSegments = trialSegments).also { items[id] = it }
     }
 
+    @Synchronized fun setManual(session: String, id: String, speaker: String?): Utterance? {
+        if (session != sessionId) return null
+        val u = items[id] ?: return null
+        return u.copy(manualSpeaker = speaker).also { items[id] = it }
+    }
+
     /** Late trial split only; the whole-sentence label, status and hints stay as they are. */
     @Synchronized fun setTrial(session: String, id: String, trialSegments: List<SpeakerSegment>): Utterance? {
         if (session != sessionId) return null

@@ -37,6 +37,8 @@ data class Utterance(
     val speakerCandidates: List<SpeakerCandidate> = emptyList(),
     /** Display-only trial split (all suggestions); never synced, drafted or used as an owner. */
     val trialSegments: List<SpeakerSegment> = emptyList(),
+    /** A person's correction (a team name or other/multi/unclear). Model updates keep it; the server stores it as a review. */
+    val manualSpeaker: String? = null,
 )
 
 /**
@@ -72,6 +74,13 @@ class TranscriptBuffer(private val retentionMs: Long) {
             speakerState = speakerState, speakerScore = speakerScore,
             speakerPreview = speakerPreview, speakerCandidates = speakerCandidates,
             trialSegments = trialSegments).also { items[index] = it }
+    }
+
+    @Synchronized
+    fun setManual(id: String, speaker: String?): Utterance? {
+        val index = items.indexOfFirst { it.id == id }
+        if (index < 0) return null
+        return items[index].copy(manualSpeaker = speaker).also { items[index] = it }
     }
 
     @Synchronized

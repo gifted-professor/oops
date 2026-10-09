@@ -13,6 +13,9 @@ H5 用 `window.OopsNative.postMessage(JSON.stringify({type,payload}))` 发送；
 | recall.trigger | {query?:string} | 按钮召回 |
 | clip.play | {key,startMs,endMs} | 回听缓存原声；key 标识按钮 |
 | clip.stop | {} | 停止回听 |
+| clip.remote | {key,sessionId,startMs,endMs} | 从服务器存档取一句原声播放（往期会议，或本场录音上传后） |
+| speaker.correct | {sessionId,utteranceId,speaker} | 人工改说话人：团队成员、`other`/`multi`/`unclear`，`null` 撤销。本场立即改显示，再写服务器（会议还没同步到服务器时每 25 秒重试，最多 3 次）；往期会议直接写服务器 |
+| tasks.list | {mine,status:"open"/"done"/"all"} | 读飞书任务列表；`mine` 需要设置里选了本人 |
 | recall.save | {cardId,utteranceIds,startMs,endMs} | 明确保存原句及可用原声 |
 | recall.dismiss | {cardId} | 丢弃卡片 |
 | commitment.open | {utteranceId} | 从本场索引打开承诺，进入现有卡片流程 |
@@ -20,7 +23,7 @@ H5 用 `window.OopsNative.postMessage(JSON.stringify({type,payload}))` 发送；
 | action.draft | {cardId,utteranceIds} | 请求行动草稿，不写入飞书 |
 | action.confirm | {draftId,who,what,whenIso,whenRaw,constraint} | 冻结草稿、持久化 op_id、提交确认 |
 | action.status | {draftId} | 查询原操作，不重新提交 |
-| settings.set | {source,remoteAddress,mockBackend,backendBaseUrl,backendToken?,speakerInfo} | 保存；收音中切换音源/远端音频地址立即生效，保留本场缓存 |
+| settings.set | {source,remoteAddress,mockBackend,backendBaseUrl,backendToken?,speakerInfo,selfName?} | 保存；收音中切换音源/远端音频地址立即生效，保留本场缓存 |
 | testAudio.pick | {} | 系统文件选择器导入 WAV，持久保留读取权限 |
 | testAudio.reset | {} | 恢复内置合成对话 |
 | open.url | {url} | 系统打开 HTTP(S) 链接 |
@@ -42,7 +45,9 @@ H5 用 `window.OopsNative.postMessage(JSON.stringify({type,payload}))` 发送；
 | recall.pending | {trigger} |
 | recall.card | {id,trigger,query,nowMs,single,engine,windowMs,latencyMs,items,pool} |
 | recall.notFound | {reason} |
-| clip.state | {key,state:"playing"/"stopped"/"ended"/"expired"} |
+| clip.state | {key,state:"playing"/"stopped"/"ended"/"expired"/"loading"/"unavailable"} |
+| speaker.corrected | {sessionId,utteranceId,speaker,status:"local"/"saved"}；local 是本机已改，saved 是服务器已保存 |
+| tasks.list | `GET /v1/tasks` 的结果，另加 {mine,status} |
 | recall.saved | {cardId,savedCount} |
 | action.draft | {draftId,cardId,who,what,whenIso,whenRaw,constraint,assigneeCandidates,evidence} |
 | action.result | {draftId,opId,status,taskGuid,taskUrl,message,readBackConfirmed,polling,mock} |

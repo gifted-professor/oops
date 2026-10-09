@@ -50,6 +50,7 @@ data class EngineState(
     val voiceTrigger: Boolean = true,
     val noticeVibrate: Boolean = true,
     val memorySync: Boolean = true,
+    val selfName: String = "",
     val syncStatus: String = "idle",
     val syncPending: Int = 0,
     val commitmentCount: Int = 0,

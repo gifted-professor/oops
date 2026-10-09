@@ -18,6 +18,10 @@ class Settings(context: Context) {
     var memorySync: Boolean
         get() = prefs.getBoolean("memory_sync", true)
         set(value) = prefs.edit { putBoolean("memory_sync", value) }
+    /** Who uses this phone (a team name, or empty): picks "my" tasks. */
+    var selfName: String
+        get() = prefs.getString("self_name", "").orEmpty()
+        set(value) = prefs.edit { putString("self_name", value) }
     var agendaJson: String
         get() = prefs.getString("agenda_json", "{}").orEmpty()
         set(value) = prefs.edit { putString("agenda_json", value) }

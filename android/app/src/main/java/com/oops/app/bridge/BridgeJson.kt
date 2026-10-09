@@ -44,7 +44,7 @@ object BridgeJson {
         .put("remoteAddress", s.remoteAddress)
         .put("asrGaps", JSONArray(s.asrGaps.map { JSONObject().put("fromMs", it.fromMs).put("toMs", it.toMs) }))
         .put("digestCounts", JSONObject(s.digestCounts)).put("agenda", s.agenda).put("notices", JSONArray(s.notices))
-        .put("voiceTrigger", s.voiceTrigger).put("noticeVibrate", s.noticeVibrate).put("memorySync", s.memorySync)
+        .put("voiceTrigger", s.voiceTrigger).put("noticeVibrate", s.noticeVibrate).put("memorySync", s.memorySync).put("selfName", s.selfName)
         .put("syncStatus", s.syncStatus).put("syncPending", s.syncPending)
         .put("commitmentCount", s.commitmentCount).put("analysisPending", s.analysisPending)
         .put("analysisFailed", s.analysisFailed).put("tagsSupported", s.tagsSupported ?: NULL)
@@ -65,6 +65,7 @@ object BridgeJson {
         .put("segments", segments(u.segments))
         .put("speakerCandidates", com.oops.app.backend.ApiJson.speakerCandidates(u.speakerCandidates))
         .put("trialSegments", segments(u.trialSegments))
+        .put("manualSpeaker", u.manualSpeaker ?: NULL)
 
     private fun segments(items: List<com.oops.app.buffer.SpeakerSegment>) = JSONArray(items.map {
         JSONObject().put("startMs", it.startMs).put("endMs", it.endMs).put("text", it.text)

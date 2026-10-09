@@ -35,6 +35,23 @@ class HttpOopsApi(private val http: OkHttpClient, baseUrl: String, private val t
     }
     override suspend fun historyDelete(id: String) = optional("/v1/meetings/delete", JSONObject().put("session_id", id).put("confirm", true))
     override suspend fun historySearch(query: String) = optional("/v1/meetings/search", JSONObject().put("query", query))
+    override suspend fun reviewMeeting(request: JSONObject) = optional("/v1/meetings/review", request)
+    override suspend fun tasks(assignee: String?, status: String): JSONObject? {
+        require(status in setOf("open", "done", "all"))
+        val query = "status=$status" + (assignee?.let { "&assignee=" + java.net.URLEncoder.encode(it, "UTF-8") } ?: "")
+        return optionalGet("/v1/tasks?$query")
+    }
+    override suspend fun recordingClip(sessionId: String, startMs: Long, endMs: Long): ByteArray? = withContext(Dispatchers.IO) {
+        require(startMs in 0 until endMs)
+        http.newCall(request(recordingPath(sessionId) + "/clip?start_ms=$startMs&end_ms=$endMs").get().build()).execute().use { response ->
+            when {
+                response.code == 404 || response.code == 501 -> null
+                response.code == 409 -> throw HttpFailure(409, "录音还没上传到这一段")
+                !response.isSuccessful -> throw HttpFailure(response.code, "原声接口返回 HTTP ${response.code}")
+                else -> com.oops.app.core.Wav.openPcm(response.body.byteStream()).use { it.readBytes() }
+            }
+        }
+    }
     private suspend fun optionalGet(path: String): JSONObject? = withContext(Dispatchers.IO) {
         http.newCall(request(path).get().build()).execute().use { response ->
             if (response.code == 404 || response.code == 501) null

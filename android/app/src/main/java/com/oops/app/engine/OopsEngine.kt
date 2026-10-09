@@ -77,6 +77,9 @@ object OopsEngine {
     private const val SPEAKER_MIN_MS = 1_000L
     private const val SPLIT_POLLS = 3
     private const val TEST_WAV = "test/dialog.wav"
+    private val MANUAL_OTHER = setOf("other", "multi", "unclear")
+    private const val REVIEW_RETRIES = 3
+    private const val REVIEW_RETRY_MS = 25_000L
 
     private lateinit var app: Application
     lateinit var settings: Settings
@@ -1449,6 +1452,7 @@ object OopsEngine {
         val q = syncContext?.queue
         _state.update { it.copy(agenda = tracker.state(nowMs), notices = tracker.list().map { n -> n.bridge() },
             voiceTrigger = settings.voiceTrigger, noticeVibrate = settings.noticeVibrate, memorySync = settings.memorySync,
+            selfName = settings.selfName,
             syncPending = q?.pendingCount() ?: 0,
             syncStatus = when { !settings.memorySync -> "off"; q == null -> "idle"; q.unsupported -> "unsupported"; q.failed -> "failed";
                 q.pendingCount() > 0 -> if (it.syncStatus == "retrying") "retrying" else "pending"; else -> "synced" }) }
@@ -1670,6 +1674,86 @@ object OopsEngine {
         }
     }
 
+    // ---- people's corrections, archived audio, tasks -----------------------------------------
+
+    /**
+     * A person says who spoke a sentence (a team name, other/multi/unclear, or null to undo). In the live meeting the
+     * line changes at once and the server is told once it holds the meeting text; a past meeting goes straight to the server.
+     */
+    fun correctSpeaker(session: String, utteranceId: String, speaker: String?) {
+        require(speaker == null || speaker in Settings.TEAM || speaker in MANUAL_OTHER) { "说话人无效" }
+        val live = synchronized(pipeline) {
+            if (session != sessionId) return@synchronized null
+            sessionIndex.setManual(session, utteranceId, speaker)?.also { transcript.setManual(utteranceId, speaker) }
+        }
+        if (live != null) {
+            emit(OopsEvent.Json("speaker.corrected", corrected(session, utteranceId, speaker, "local")))
+            publishSessionSummary(session)
+            if (!settings.memorySync) {
+                emit(OopsEvent.Toast("会议文字同步已关闭，只改了本机显示"))
+                return
+            }
+        }
+        val client = api
+        scope.launch {
+            val body = JSONObject().put("session_id", session).put("utterance_id", utteranceId)
+                .put("speaker", speaker ?: JSONObject.NULL).put("by", settings.selfName.ifEmpty { JSONObject.NULL })
+            try {
+                // The live meeting may not have reached the server yet: the sync queue sends every 20 s.
+                var result = client.reviewMeeting(body)
+                var tries = 0
+                while (result == null && live != null && tries++ < REVIEW_RETRIES) {
+                    delay(REVIEW_RETRY_MS)
+                    result = client.reviewMeeting(body)
+                }
+                if (result == null) {
+                    fail("review", if (live != null) "服务器还没有这场会议的文字，改动只在本机" else "当前后端不支持修改说话人")
+                    return@launch
+                }
+                emit(OopsEvent.Json("speaker.corrected", corrected(session, utteranceId, speaker, "saved")))
+                if (live != null) synchronized(pipeline) {
+                    // The server now drafts with the corrected speaker; ask again for this sentence's owner.
+                    sessionIndex.get(utteranceId)?.let { refreshOwnerHint(session, it) }
+                    refreshDraftSuggestions(session, utteranceId)
+                }
+            } catch (error: CancellationException) { throw error }
+            catch (error: Exception) { fail("review", "说话人修改没有保存到服务器：${error.message}") }
+        }
+    }
+
+    private fun corrected(session: String, id: String, speaker: String?, status: String) = JSONObject()
+        .put("sessionId", session).put("utteranceId", id).put("speaker", speaker ?: JSONObject.NULL).put("status", status)
+
+    /** Plays a sentence from the server's archive (a past meeting, or this one once its recording is uploaded). */
+    fun playRemoteClip(key: String, session: String, startMs: Long, endMs: Long) {
+        val client = api
+        scope.launch {
+            try {
+                emit(OopsEvent.Clip(key, "loading"))
+                val pcm = client.recordingClip(session, startMs, endMs)
+                if (pcm == null || pcm.isEmpty()) emit(OopsEvent.Clip(key, "unavailable")) else player.play(key, pcm)
+            } catch (error: CancellationException) { throw error }
+            catch (error: Exception) {
+                emit(OopsEvent.Clip(key, "unavailable"))
+                fail("clip", "原声取不到：${error.message}")
+            }
+        }
+    }
+
+    fun tasks(mine: Boolean, status: String) {
+        val client = api
+        scope.launch {
+            try {
+                val self = settings.selfName.ifEmpty { null }
+                require(!mine || self != null) { "请先在设置里选择本人" }
+                val result = client.tasks(if (mine) self else null, status)
+                if (result == null) fail("tasks", "当前后端不支持任务列表")
+                else emit(OopsEvent.Json("tasks.list", result.put("mine", mine).put("status", status)))
+            } catch (error: CancellationException) { throw error }
+            catch (error: Exception) { fail("tasks", "任务列表请求失败：${error.message}") }
+        }
+    }
+
     // ---- settings --------------------------------------------------------------------------
 
     fun applySettings(json: JSONObject) {
@@ -1698,6 +1782,11 @@ object OopsEngine {
         }
         if (json.has("backendBaseUrl")) settings.backendBaseUrl = json.getString("backendBaseUrl")
         if (json.has("backendToken")) settings.backendToken = json.getString("backendToken")
+        if (json.has("selfName")) {
+            val name = json.getString("selfName")
+            require(name.isEmpty() || name in Settings.TEAM) { "本人必须是团队成员" }
+            settings.selfName = name
+        }
         if (json.has("mockBackend")) settings.mockBackend = json.getBoolean("mockBackend")
         val url = settings.backendBaseUrl
         if (!settings.mockBackend && !(url.startsWith("http://") || url.startsWith("https://"))) {

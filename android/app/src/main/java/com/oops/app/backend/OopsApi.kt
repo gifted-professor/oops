@@ -13,6 +13,12 @@ interface OopsApi {
     suspend fun historyOpen(id: String): org.json.JSONObject? = null
     suspend fun historyDelete(id: String): org.json.JSONObject? = null
     suspend fun historySearch(query: String): org.json.JSONObject? = null
+    /** A person's correction of one sentence; null when the server does not have that meeting (yet). */
+    suspend fun reviewMeeting(request: org.json.JSONObject): org.json.JSONObject? = null
+    /** One archived sentence as 16 kHz mono PCM, cut on the server; null when it has no recording. */
+    suspend fun recordingClip(sessionId: String, startMs: Long, endMs: Long): ByteArray? = null
+    /** Created Feishu tasks with their current Feishu state; null when unsupported. */
+    suspend fun tasks(assignee: String?, status: String): org.json.JSONObject? = null
 
     /** Evidence selection: the backend may only pick candidate ids (Jev, LLM fallback). */
     suspend fun recall(request: RecallRequest): RecallResponse
