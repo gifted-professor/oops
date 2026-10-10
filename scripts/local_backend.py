@@ -43,6 +43,7 @@ from voiceprint_registry import VoiceprintRegistry, audio_quality, person_profil
 from voiceprint_invites import invite_person
 from recordings import RecordingError, Recordings
 from task_resolver import load_deepseek, owner_for, resolve_all
+from feishu_actions import FeishuActions
 from speaker_attribution import (attribute, calibrated_probability, owner_features, OWNER_EVENT,
                                  SEGMENT_EVENT, consolidate_trial, leading_guess, merge_for_display,
                                  unknown_segment)
@@ -597,10 +598,11 @@ def lark_cli_path(explicit):
     return found
 
 
-def run_lark(lark, args, timeout=20):
+def run_lark(lark, args, timeout=20, cwd=None):
+    """cwd: lark-cli accepts local files only relative to its working directory."""
     env = dict(os.environ, PATH=os.path.dirname(lark) + os.pathsep + os.environ.get("PATH", ""))
     proc = subprocess.run([lark, *args, "--format", "json"], capture_output=True, text=True,
-                          timeout=timeout, env=env)
+                          timeout=timeout, env=env, cwd=cwd)
     text = (proc.stdout or "").strip()
     try:
         data = json.loads(text) if text else {}
@@ -1172,6 +1174,9 @@ class Backend:
             owner=lambda value: commitment_evidence(value)[1], deadline=lambda value: WHEN.search(value).group(0) if WHEN.search(value) else None,
             team=TEAM)
         self.recordings = Recordings(os.path.join(state, "recordings"), deleted=self.meeting_deleted)
+        # The Oops bot: private meeting summaries, task notices, follow-up events, the ledger and Mac helper jobs.
+        self.feishu = (FeishuActions(self, state, self.lark, run_lark, log, dry_run=args.feishu == "dry-run")
+                       if os.environ.get("OOPS_FEISHU_BOT") == "1" else None)
         self.speakers = Speakers(args.speaker_accept, args.speaker_margin, os.path.join(state, "voiceprints.json"))
         self.speaker_preview, self.preview_error = None, None
         if getattr(args, 'speaker_preview', False) and self.speakers.ready:
@@ -1837,6 +1842,8 @@ class Backend:
                 self.ops.running.pop(op_id, None)
             done.set()
             log(f"confirm {op_id[:8]} → {op['status']} {op.get('message') or ''}")
+        if op["status"] == "created" and getattr(self, "feishu", None):
+            self.feishu.task_created(op)
 
     def write_feishu(self, op):
         req = op["request"]
@@ -1904,6 +1911,12 @@ class Handler(BaseHTTPRequestHandler):
         status, summary = 200, ""
         try:
             authorization = self.headers.get("Authorization", "")
+            if urlsplit(self.path).path.startswith("/v1/agent/"):
+                value, summary = self.agent_call(method, authorization)
+                self.reply(200, value)
+                if summary != "job=-":  # an empty poll every 10 s is not worth a log line
+                    log(f"{method} {urlsplit(self.path).path} 200 {int((time.monotonic() - started) * 1000)}ms {summary}")
+                return
             person = invite_person(self.enroll_secret, authorization.removeprefix("Bearer "), TEAM)
             full_access = not self.api_token or hmac.compare_digest(authorization.encode(), ("Bearer " + self.api_token).encode())
             if not full_access and not person:
@@ -1920,7 +1933,9 @@ class Handler(BaseHTTPRequestHandler):
                          "strict_a_enabled": getattr(self.backend, "strict_a_enabled", False),
                          "self_owner_enabled": getattr(self.backend, "self_owner_enabled", False),
                          "named_owner_enabled": getattr(self.backend, "named_owner_enabled", False),
-                         "notices": True, "meetings": True, "recordings": True}
+                         "notices": True, "meetings": True, "recordings": True,
+                         "feishu_bot": getattr(self.backend, "feishu", None) is not None,
+                         "mac_agent_online": bool(getattr(self.backend, "feishu", None) and self.backend.feishu.jobs.online())}
                 summary = "health"
             elif method == "GET" and self.path == "/v1/voiceprints":
                 value = self.backend.voiceprint_catalog()
@@ -2042,6 +2057,31 @@ class Handler(BaseHTTPRequestHandler):
         except OSError as error:  # the phone gave up (timeout) before the answer; still log how long it took
             summary += f" reply-failed={type(error).__name__}"
         log(f"{method} {self.path} {status} {int((time.monotonic() - started) * 1000)}ms {summary}")
+
+    def agent_call(self, method, authorization):
+        """The Mac helper: its own token, and only these routes. Errors are raised as ApiError like elsewhere."""
+        token = os.environ.get("OOPS_AGENT_TOKEN", "").strip()
+        feishu = getattr(self.backend, "feishu", None)
+        if not token or not hmac.compare_digest(authorization.encode(), ("Bearer " + token).encode()):
+            raise ApiError(401, "UNAUTHORIZED", "助手凭据无效")
+        if not feishu or method != "POST":
+            raise ApiError(404, "NOT_FOUND", "没有这个接口")
+        m = re.fullmatch(r"/v1/agent/(poll)|/v1/agent/jobs/([a-f0-9]{32})/(chunk|result)", urlsplit(self.path).path)
+        if not m:
+            raise ApiError(404, "NOT_FOUND", "没有这个接口")
+        size = int(self.headers.get("Content-Length") or 0)
+        if not 0 < size <= 1_900_000:
+            raise ApiError(400, "BAD_REQUEST", "请求体为空或过大")
+        try:
+            body = json.loads(self.rfile.read(size))
+            if m.group(1):
+                self.connection.settimeout(30)  # a poll waits for work
+                value = feishu.agent_call("poll", body)
+                return value, f"job={(value['job'] or {}).get('id', '-')[:8]}"
+            value = feishu.agent_call(m.group(3), body, m.group(2))
+            return value, m.group(3)
+        except (ValueError, KeyError, TypeError, FileNotFoundError, json.JSONDecodeError) as error:
+            raise ApiError(400, "BAD_REQUEST", str(error)[:200]) from None
 
     def do_POST(self):
         self.handle_call("POST")
@@ -2205,6 +2245,9 @@ def main():
         resolve_people(backend.lark, backend.people.path)
         backend.people = People(backend.people.path)
     Handler.backend = backend
+    if backend.feishu:
+        backend.feishu.start()
+        log(f"Oops 机器人：已开启（Mac 助手凭据{'已' if os.environ.get('OOPS_AGENT_TOKEN') else '未'}配置）")
     Handler.api_token = os.environ.get("OOPS_API_TOKEN", "").strip()
     Handler.enroll_secret = os.environ.get("OOPS_ENROLL_SECRET", "").strip()
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)

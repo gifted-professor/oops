@@ -25,6 +25,8 @@ python3 scripts/test_attribution_io.py
 python3 scripts/test_mac_audio_bridge.py
 python3 scripts/test_task_resolver.py
 python3 scripts/test_recordings.py
+python3 scripts/test_feishu_actions.py
+python3 -m py_compile scripts/feishu_actions.py scripts/oops_mac_agent.py
 python3 -m unittest discover -s scripts -p 'test_speaker_attribution.py'
 python3 -m unittest discover -s scripts -p 'test_speaker_latency.py'
 python3 scripts/test_latency_report.py
