@@ -71,6 +71,32 @@ def candidates(rows, limit=60, chars=12000):
     return result
 
 
+def sync_candidates(rows, limit=500, chars=500000):
+    """A device batch: a sentence the server cannot store is skipped and reported, so one bad row never stops a meeting.
+
+    A sentence whose experimental speaker split is malformed keeps its text without the split.
+    """
+    if not isinstance(rows, list) or len(rows) > limit:
+        raise ValueError('原话数量超限')
+    kept, rejected = {}, []
+    for row in rows:
+        try:
+            saved = candidates([row], 1, chars)[0]
+        except ValueError as error:
+            try:
+                if not isinstance(row, dict) or 'segments' not in row:
+                    raise
+                saved = candidates([{k: v for k, v in row.items() if k != 'segments'}], 1, chars)[0]
+            except ValueError:
+                rid = row.get('id') if isinstance(row, dict) and isinstance(row.get('id'), str) else None
+                rejected.append(dict(id=rid[:100] if rid else None, reason=str(error)[:100]))
+                continue
+        kept[saved['id']] = saved
+    if sum(len(r['text']) for r in kept.values()) > chars:
+        raise ValueError('原话文字总量超限')
+    return list(kept.values()), rejected
+
+
 def speaker_segments(rows, utterance):
     """Persist only text attribution fields, never PCM or experimental preview.
 
@@ -339,7 +365,7 @@ class Meetings:
 
     def sync(self, req):
         sid = identifier(req.get('session_id'))
-        rows = candidates(req.get('utterances', []), 500, 500000)
+        rows, rejected = sync_candidates(req.get('utterances', []))
         raw_notices = req.get('notices', [])
         if not isinstance(raw_notices, list) or len(raw_notices) > 100:
             raise ValueError('提醒数量超限')
@@ -375,7 +401,12 @@ class Meetings:
                 raise ValueError('会议开始日期不可变')
             if req.get('ended_at'):
                 row['ended_at'] = req['ended_at']
-            row['agenda'] = ag
+                # A phone that was killed mid-meeting estimates the end when it is next opened.
+                row['ended_source'] = 'recovered' if req.get('recovered') is True else 'device'
+            if 'agenda' in req:  # an end-only resend carries no agenda and must not wipe it
+                row['agenda'] = ag
+            if rows:
+                row['last_sync_at'] = dt.datetime.now(dt.timezone.utc).isoformat()
             for key, updates in (('utterances', rows), ('notices', notices)):
                 merged = {i['id']: {k:v for k,v in i.items() if k not in DERIVED} for i in row[key]}
                 merged.update({i['id']: i for i in updates})
@@ -384,7 +415,22 @@ class Meetings:
                 row[key] = list(merged.values())
             row['utterances'].sort(key=lambda u: (u['start_ms'], u['id']))
             self.write(sid, row)
-            return dict(session_id=sid, utterance_count=len(row['utterances']), notice_count=len(row['notices']))
+            result = dict(session_id=sid, utterance_count=len(row['utterances']), notice_count=len(row['notices']))
+            return dict(result, rejected=rejected) if rejected else result
+
+    def set_ended(self, sid, ended_at, source):
+        """End time from another signal (e.g. the uploaded recording); never overrides one the phone sent."""
+        timestamp(ended_at)
+        with self.lock:
+            path = self.path(sid)
+            if os.path.exists(path + '.deleted') or not os.path.isfile(path):
+                return False
+            row = read_json(path)
+            if row.get('ended_at'):
+                return False
+            row['ended_at'], row['ended_source'] = ended_at, source
+            self.write(sid, row)
+            return True
 
     def write(self, sid, row):
         row['updated_at'] = dt.datetime.now(dt.timezone.utc).isoformat()
@@ -446,17 +492,21 @@ class Meetings:
 
     TITLE_MIN_UTTERANCES = 5
 
-    def title_jobs(self, now=None):
-        """Finished meetings whose generated title is missing or older than their text: (session_id, count, transcript)."""
+    def title_jobs(self, now=None, sid=None):
+        """Finished meetings whose generated title is missing or older than their text: (session_id, count, transcript).
+
+        With sid, only that meeting, which the caller already knows is over.
+        """
         now = now or dt.datetime.now(dt.timezone.utc)
         jobs = []
         with self.lock:
-            for name in os.listdir(self.dir):
-                if not name.endswith('.json'):
+            names = [identifier(sid) + '.json'] if sid else os.listdir(self.dir)
+            for name in names:
+                if not name.endswith('.json') or not os.path.isfile(os.path.join(self.dir, name)):
                     continue
                 row = read_json(os.path.join(self.dir, name))
                 count = len(row['utterances'])
-                finished = row.get('ended_at') or now - timestamp(row['started_at']) > dt.timedelta(hours=3)
+                finished = sid or row.get('ended_at') or now - timestamp(row['started_at']) > dt.timedelta(hours=3)
                 if (row.get('title') or (row.get('agenda') or {}).get('goal') or not finished
                         or count < self.TITLE_MIN_UTTERANCES or (row.get('auto_title') or {}).get('count') == count):
                     continue

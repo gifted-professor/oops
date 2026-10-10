@@ -3,7 +3,8 @@
 
 On the Mac, inside the repo (builds the release directory; changes nothing else):
     python3 deploy/review-queue-upgrade.py build /tmp/review-release [--baseline-rev <commit now live>]
-    (0e3e865 for the first review release; 5e17017 for the meeting-title update on top of it)
+    (0e3e865 for the first review release; 5e17017 for the meeting-title update on top of it;
+     3e11db9 for the meeting-end and Oops bot fixes on top of the bot release)
 On the HK host as root, after uploading that directory:
     python3 review-queue-upgrade.py /opt/oops/releases/review             # preflight only
     python3 review-queue-upgrade.py /opt/oops/releases/review --apply     # back up, replace, restart, verify, or roll back
@@ -27,7 +28,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-FILES = ('scripts/local_backend.py', 'scripts/meeting_features.py', 'scripts/recordings.py')
+FILES = ('scripts/local_backend.py', 'scripts/meeting_features.py', 'scripts/recordings.py', 'scripts/feishu_actions.py')
 APP = Path('/opt/oops/app')
 BASE = 'http://127.0.0.1:8787'
 PROTECTED = (Path('/var/lib/oops/backend/people.json'), Path('/var/lib/oops/backend/voiceprints.json'),

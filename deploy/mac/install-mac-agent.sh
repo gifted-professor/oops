@@ -5,7 +5,7 @@ ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 mkdir -p "$HOME/.oops-agent" && chmod 700 "$HOME/.oops-agent"
 [ -x "$HOME/.oops-agent/venv/bin/python" ] || /opt/homebrew/opt/python@3.14/bin/python3.14 -m venv "$HOME/.oops-agent/venv"
 "$HOME/.oops-agent/venv/bin/python" -c 'import pptx' 2>/dev/null || "$HOME/.oops-agent/venv/bin/pip" install -q python-pptx
-cp "$ROOT/scripts/oops_mac_agent.py" "$HOME/.oops-agent/oops_mac_agent.py"
+cp "$ROOT/scripts/oops_mac_agent.py" "$ROOT/scripts/oops_slides.py" "$HOME/.oops-agent/"
 [ -f "$HOME/.oops-agent/config.json" ] || { echo "缺少 ~/.oops-agent/config.json（server、token）"; exit 1; }
 chmod 600 "$HOME/.oops-agent/config.json"
 cp "$ROOT/deploy/mac/local.oops.mac-agent.plist" "$HOME/Library/LaunchAgents/"

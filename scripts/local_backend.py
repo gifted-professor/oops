@@ -1298,10 +1298,24 @@ class Backend:
             if action == "clip": return self.recordings.clip(sid, start, end)
             if action == "manifest": return self.recordings.manifest(sid, body)
             if action == "chunk": return self.recordings.chunk(sid, name, offset, data, sha)
-            if action == "complete": return self.recordings.complete(sid)
+            if action == "complete":
+                result = self.recordings.complete(sid)
+                self.end_from_recording(sid)
+                return result
             return self.recordings.status(sid)
         except RecordingError as error:
             raise ApiError(error.status, "RECORDING", str(error), **error.extra) from None
+
+    def end_from_recording(self, sid):
+        """A phone killed mid-meeting never sent an end time; the recording it uploads later carries one."""
+        try:
+            meta = self.recordings.meta(sid)
+            ended = meta.get("audio_ended_at")
+            # A recording cut at the length cap ends at the cap, not when the meeting did.
+            if ended and meta.get("capped") != "True" and self.meetings.set_ended(sid, ended, "recording"):
+                log(f"meeting {sid[:8]} end time from its recording: {ended}")
+        except (OSError, ValueError, RecordingError) as error:
+            log(f"meeting {sid[:8]} end time from recording skipped: {type(error).__name__}")
 
     def meeting_call(self, action, body):
         try:
@@ -2008,6 +2022,12 @@ class Handler(BaseHTTPRequestHandler):
                     summary = f"recording {action} complete={value.get('complete')}"
                 elif self.path in ('/v1/meetings/sync', '/v1/meetings/delete', '/v1/meetings/search', '/v1/meetings/review', '/v1/meetings/rename', '/v1/meetings/project'):
                     value = self.backend.meeting_call(self.path.rsplit('/', 1)[1], body)
+                    if self.path == '/v1/meetings/sync':
+                        utterances = body.get('utterances')
+                        summary = (f"sync {str(body.get('session_id'))[:8]} +{len(utterances) if isinstance(utterances, list) else 0}"
+                                   f" total={value['utterance_count']}" + (" ended" if body.get('ended_at') else "")
+                                   + (" recovered" if body.get('recovered') is True else "")
+                                   + (f" rejected={len(value['rejected'])}" if value.get('rejected') else ""))
                 elif self.path == "/v1/recall":
                     value = self.backend.recall(body)
                     summary = f"engine={value['engine']} picks={len(value['picks'])}"

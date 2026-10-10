@@ -65,6 +65,10 @@ class Recordings:
             raise RecordingError(409, "请先提交文件清单")
         return json.load(open(path, encoding="utf-8"))
 
+    def meta(self, sid):
+        """What the phone said about the recording (strings, as declared in the manifest)."""
+        return self._manifest(sid).get("meta") or {}
+
     def _received(self, folder, name):
         path = os.path.join(folder, name)
         return os.path.getsize(path) if os.path.isfile(path) else 0

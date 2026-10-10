@@ -327,6 +327,43 @@ class FeatureTest(unittest.TestCase):
             self.assertEqual([], m.historical('next', '预算十万上线', overlap))  # rejected decision and constraint are not history
 
 
+    def test_sync_skips_bad_sentences_and_keeps_agenda_and_end(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            m = Meetings(scratch, team=TEAM)
+            started = dt.datetime.now(dt.timezone.utc).isoformat()
+            split = dict(utterance('u2', '好的。', None), segments=[dict(start_ms=0, end_ms=1000, text='不对', speaker=None)])
+            result = m.sync(dict(session_id='s', started_at=started, agenda=dict(goal='版本规划', items=[]),
+                                 utterances=[utterance(), dict(utterance('u9'), end_ms=0), split]))
+            # One sentence the server cannot store no longer stops the meeting; a bad split only loses the split.
+            self.assertEqual([dict(id='u9', reason='原话时间无效')], result['rejected'])
+            row = read_raw(m, 's')
+            self.assertEqual(['u1', 'u2'], [u['id'] for u in row['utterances']])
+            self.assertNotIn('segments', row['utterances'][1])
+            self.assertTrue(row['last_sync_at'])
+            # An end-only resend (a phone that was killed) keeps the agenda and says where the end came from.
+            synced = row['last_sync_at']
+            m.sync(dict(session_id='s', ended_at=started, recovered=True, time_zone='UTC', utterances=[]))
+            row = read_raw(m, 's')
+            self.assertEqual(('版本规划', started, 'recovered', synced),
+                             (row['agenda']['goal'], row['ended_at'], row['ended_source'], row['last_sync_at']))
+            self.assertFalse(m.set_ended('s', started, 'recording'))  # never overrides the phone
+
+    def test_recording_upload_supplies_a_missing_end(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            backend = Backend.__new__(Backend)
+            backend.meetings = Meetings(os.path.join(scratch, 'meetings'), team=TEAM)
+            backend.recordings = types.SimpleNamespace(meta=lambda sid: {
+                'killed': dict(audio_ended_at='2026-10-10T07:00:00Z', capped='False'),
+                'capped': dict(audio_ended_at='2026-10-10T07:00:00Z', capped='True')}.get(sid, {}))
+            started = '2026-10-10T06:00:00Z'
+            for sid in ('killed', 'capped', 'none'):
+                backend.meetings.sync(dict(session_id=sid, started_at=started, utterances=[utterance()]))
+                backend.end_from_recording(sid)
+            self.assertEqual(('2026-10-10T07:00:00Z', 'recording'),
+                             (read_raw(backend.meetings, 'killed')['ended_at'], read_raw(backend.meetings, 'killed')['ended_source']))
+            self.assertNotIn('ended_at', read_raw(backend.meetings, 'capped'))  # the cap is not the end of the meeting
+            self.assertNotIn('ended_at', read_raw(backend.meetings, 'none'))
+
     def test_titles_auto_agenda_manual_and_sync_keeps_them(self):
         from meeting_features import short_title
         self.assertEqual('下周三上线这个版本', short_title('那就是，嗯，下周三上线这个版本。其他再说'))
