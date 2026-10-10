@@ -1673,6 +1673,22 @@
     if (field) editDraftField(field, e.target.value || (field === 'whenIso' ? null : ''));
   });
   $('backdrop').addEventListener('click', closeSheet);
+  // Swiping down from the handle or the title closes the sheet.
+  let sheetDrag = null;
+  $('sheet').addEventListener('touchstart', (e) => { sheetDrag = e.target.closest('.sheet-handle-zone, .sheet-header') ? e.touches[0].clientY : null; }, { passive: true });
+  $('sheet').addEventListener('touchend', (e) => {
+    if (sheetDrag !== null && e.changedTouches[0].clientY - sheetDrag > 60) closeSheet();
+    sheetDrag = null;
+  }, { passive: true });
+  // The system back key/gesture: close the sheet, then step back through the pages. false = nothing left to go back to.
+  window.OopsBack = () => {
+    if (S.sheet) { closeSheet(); return true; }
+    if (!$('sheet').hidden) { closeSheet(); return true; }
+    const r = S.route.name;
+    if (['live', 'meeting', 'project', 'settings'].includes(r)) { back(); return true; }
+    if (r !== 'home') { go('home'); return true; }
+    return false;
+  };
   $('root').addEventListener('click', (e) => {
     if (e.target.closest('#sheet')) return;
     const el = e.target.closest('[data-act]');

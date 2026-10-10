@@ -14,6 +14,7 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.RenderProcessGoneDetail
 import androidx.activity.ComponentActivity
+import androidx.activity.OnBackPressedCallback
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
@@ -77,6 +78,15 @@ class MainActivity : ComponentActivity() {
             settings.allowContentAccess = false
         }
         setContentView(webView)
+        // Back closes the open sheet, then steps back through the pages; only from the home page it leaves the app
+        // (moveTaskToBack: a running capture and its UI stay as they are).
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                webView.evaluateJavascript("(window.OopsBack ? window.OopsBack() : false)") { handled ->
+                    if (handled != "true") moveTaskToBack(true)
+                }
+            }
+        })
         bridge = WebBridge(webView, ::onBridgeMessage) // before any callback below can use it
 
         // The page draws edge to edge and pads itself with these (CSS px).

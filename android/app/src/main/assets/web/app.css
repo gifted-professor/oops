@@ -78,3 +78,14 @@ body { -webkit-tap-highlight-color: transparent; }
 .oops-root select { appearance: none; -webkit-appearance: none; }
 /* In the prototype's sheets the row icons have no tile behind them. */
 .oops-root .bottom-sheet .row-icon { background: transparent; width: 30px; justify-items: start; }
+
+/* Touch targets: the visible size stays as designed, the tappable area grows to at least 44px. */
+.oops-root .icon-button, .oops-root .chip, .oops-root .play-mini, .oops-root .text-action, .oops-root .input-text,
+.oops-root .ms-space, .oops-root [data-act="memory-tab"], .oops-root [data-act="tasks-scope"], .oops-root [data-act="tab"],
+.oops-root [data-act="saved-list"], .oops-root .rc-scene, #rc .rc-actions button { position: relative; }
+.oops-root .icon-button::after, .oops-root .chip::after, .oops-root .play-mini::after, .oops-root .text-action::after,
+.oops-root .input-text::after, .oops-root .ms-space::after, .oops-root [data-act="memory-tab"]::after,
+.oops-root [data-act="tasks-scope"]::after, .oops-root [data-act="tab"]::after, .oops-root [data-act="saved-list"]::after,
+.oops-root .rc-scene::after, #rc .rc-actions button::after, .oops-root .session-more::after {
+  content: ''; position: absolute; left: 50%; top: 50%; width: max(100%, 44px); height: max(100%, 44px); transform: translate(-50%, -50%); }
+.oops-root .sheet-handle-zone { min-height: 44px; }
