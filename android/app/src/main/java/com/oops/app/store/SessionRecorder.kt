@@ -92,6 +92,15 @@ class SessionRecorder(dir: File, val sessionId: String, private val meta: JSONOb
         }
     }
 
+    /** Removes a session that never got going (capture failed to start), so no empty recording is uploaded. */
+    fun discard() {
+        synchronized(audioLock) {
+            runCatching { out?.close() }
+            out = null
+        }
+        IO.execute { listOf(pcmFile, finalsFile, asrFile, timingFile, metaFile).forEach { it.delete() } }
+    }
+
     /** Waits until every queued text line has been written (tests, and before reading the files back). */
     fun flush(timeoutMs: Long = 5_000) {
         runCatching { IO.submit {}.get(timeoutMs, TimeUnit.MILLISECONDS) }

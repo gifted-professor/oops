@@ -182,6 +182,7 @@ object OopsEngine {
             opIds[draft.draftId] = operation.request.opId
         }
         rebuildApi()
+        recoverUnfinishedMeetings() // before any capture can start, so the new session is never mistaken for one
         watchNetwork()
         updateAssistanceState()
         _state.update {
@@ -197,6 +198,30 @@ object OopsEngine {
             while (isActive) {
                 scheduleUpload()
                 delay(15 * 60_000L)
+            }
+        }
+    }
+
+    /** A meeting the app never stopped still tells the server it ended, so its minutes go out (see [SessionRecovery]). */
+    private fun recoverUnfinishedMeetings() {
+        val dir = File(app.filesDir, "recordings")
+        val ended = runCatching { com.oops.app.store.SessionRecovery.scan(dir, active = null) }
+            .onFailure { Log.w(TAG, "unfinished meeting scan failed: ${it.message}") }.getOrDefault(emptyList())
+        if (ended.isEmpty() || !settings.memorySync) return
+        val client = api
+        scope.launch(Dispatchers.IO) {
+            for ((id, at) in ended) {
+                try {
+                    client.syncMeeting(com.oops.app.store.SessionRecovery.endBody(id, at))
+                    com.oops.app.store.SessionRecovery.markSent(dir, id)
+                    Log.i(TAG, "unfinished meeting $id: end $at sent")
+                } catch (error: CancellationException) { throw error }
+                catch (error: Exception) {
+                    // A refusal (e.g. the meeting was deleted, or never synced) is final; anything else retries next start.
+                    if (error is com.oops.app.backend.HttpFailure && error.status in setOf(400, 409, 410, 413))
+                        com.oops.app.store.SessionRecovery.markSent(dir, id)
+                    Log.w(TAG, "unfinished meeting $id: end not sent: ${error.javaClass.simpleName}")
+                }
             }
         }
     }
@@ -284,7 +309,9 @@ object OopsEngine {
                 asr?.cancel()
                 asr = null
                 _state.update { it.copy(capturing = false, asr = "off", sourceDetail = null, sourceReady = false) }
-                syncContext?.let { it.stopped = true; it.queue.halt(); it.job?.cancel() }
+                syncContext?.let { it.stopped = true; it.queue.halt(endToo = true); it.job?.cancel() }
+                recorder?.discard() // nothing was captured: no empty recording to upload later
+                recorder = null
                 fail("capture", "无法开始收音：${e.message}")
                 CaptureService.stop(app)
                 return
@@ -1501,14 +1528,16 @@ object OopsEngine {
                         } catch (error: CancellationException) { throw error }
                         catch (error: Exception) {
                             ctx.queue.complete(batch, SystemClock.elapsedRealtime(), false)
-                            if (error is com.oops.app.backend.HttpFailure && error.status in setOf(400, 409, 410, 413)) ctx.queue.halt()
+                            // A refused batch stops the sentences; a refused end (or a deleted meeting) stops everything.
+                            if (error is com.oops.app.backend.HttpFailure && error.status in setOf(400, 409, 410, 413))
+                                ctx.queue.halt(endToo = ctx.queue.failed || error.status == 410)
                             if (syncContext === ctx) _state.update { it.copy(syncStatus = "retrying") }
                             Log.w(TAG, "meeting sync failed: ${error.javaClass.simpleName}")
                         }
                     }
                 }
                 if (syncContext === ctx) updateAssistanceState()
-                if (ctx.queue.unsupported || ctx.queue.failed || ctx.stopped && ctx.queue.pendingCount() == 0) break
+                if (ctx.queue.finished() || ctx.stopped && ctx.queue.pendingCount() == 0) break
                 delay(1_000)
             }
             if (ctx.stopped && ctx.queue.pendingCount() == 0) syncContexts.remove(ctx)
@@ -1671,7 +1700,7 @@ object OopsEngine {
                         require(confirm) { "请确认删除会议文字" }
                         require(value != sessionId || !_state.value.capturing) { "请先停止收音，再删除本场文字" }
                         val result = client.historyDelete(value)
-                        if (result != null) syncContexts.filter { it.queue.sessionId == value }.forEach { it.queue.halt(); it.job?.cancel() }
+                        if (result != null) syncContexts.filter { it.queue.sessionId == value }.forEach { it.queue.halt(endToo = true); it.job?.cancel() }
                         result
                     }
                     "search" -> { require(value.isNotBlank() && value.length <= 500); client.historySearch(value) }
