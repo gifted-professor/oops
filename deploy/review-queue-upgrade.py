@@ -80,8 +80,11 @@ def service_token():
     return environment['OOPS_API_TOKEN']
 
 
+VOLATILE = ('jev_stats', 'mac_agent_online')  # counters restart; the Mac helper is back online on its next poll
+
+
 def strip(health):
-    return {k: v for k, v in health.items() if k != 'jev_stats'}
+    return {k: v for k, v in health.items() if k not in VOLATILE}
 
 
 def wait_healthy(token):
@@ -130,7 +133,7 @@ def apply(release, manifest, token, before, stamp):
         subprocess.run(['systemctl', 'restart', 'oops-backend'], check=True)
         after = wait_healthy(token)
         for key in before:
-            if key != 'jev_stats' and after.get(key) != before[key]:  # counters restart with the process
+            if key not in VOLATILE and after.get(key) != before[key]:
                 raise RuntimeError('Capability changed after restart: ' + key)
         checks = smoke(token, stamp)
         for path, digest in hashes.items():
