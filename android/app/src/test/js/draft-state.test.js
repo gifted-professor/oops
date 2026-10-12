@@ -1,0 +1,27 @@
+'use strict';
+const assert = require('node:assert/strict');
+const state = require('../../main/assets/web/draft-state.js');
+const initial = {draftId: 'd1', modelRevision: 1, who: '', what: '模型事项', whenIso: null, constraint: null,
+  ownerSource: 'self', tier: 'B', ownerConfidence: .8, suggestedOwner: '洪玉麟'};
+const d = state.create(initial);
+assert.equal(d.data.who, '');
+assert.equal(state.create({...initial, ownerSource: 'named', who: '洪玉麟'}).data.who, '');
+state.edit(d, 'who', '林春源'); state.edit(d, 'what', '人工事项');
+state.edit(d, 'whenIso', '2026-10-10'); state.edit(d, 'constraint', '预算十万');
+const later = {...initial, modelRevision: 2, who: '洪玉麟', what: '改动模型事项', tier: 'A', ownerConfidence: .99};
+assert.equal(state.merge(d, later), true);
+assert.equal(d.data.who, '林春源'); assert.equal(d.data.what, '人工事项');
+assert.equal(d.data.whenIso, '2026-10-10'); assert.equal(d.data.constraint, '预算十万');
+assert.equal(d.data.ownerConfidence, .99); assert.equal(d.reviewStatus, 'unreviewed');
+assert.equal(state.merge(d, initial), false);
+const confirmation = state.confirm(d);
+assert.equal(confirmation.ownerSelectionSource, 'user'); assert.equal(confirmation.ownerConfidence, .99);
+assert.equal(state.merge(d, {...later, modelRevision: 3, ownerConfidence: 1}), false);
+d.status = 'failed'; d.submitted = true;
+assert.equal(state.merge(d, {...later, modelRevision: 4}), false);
+const recovered = state.create({...later, tier: 'C', who: '林春源', reviewStatus: 'confirmed'});
+assert.equal(recovered.data.who, '林春源'); assert.equal(recovered.submitted, true);
+const untouched = state.create(initial);
+assert.equal(state.merge(untouched, later), true); assert.equal(untouched.data.who, '洪玉麟');
+assert.equal(untouched.reviewStatus, 'unreviewed');
+console.log('draft-state: dirty edits, stale suggestions, self B, human confirmation, restart freeze passed');

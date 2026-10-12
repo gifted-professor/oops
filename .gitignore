@@ -21,6 +21,7 @@ captures/
 .claude/settings.local.json
 test-media/
 scripts/__pycache__/
+deploy/__pycache__/
 evidence/
 讨论/
 

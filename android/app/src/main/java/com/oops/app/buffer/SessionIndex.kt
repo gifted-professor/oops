@@ -94,11 +94,27 @@ class SessionIndex(
 
     @Synchronized fun setSpeaker(session: String, id: String, speaker: String?, segments: List<SpeakerSegment> = emptyList(),
                                 speakerState: String? = null, speakerScore: Double? = null,
-                                speakerPreview: SpeakerPreview? = null): Utterance? {
+                                speakerPreview: SpeakerPreview? = null,
+                                speakerCandidates: List<SpeakerCandidate> = emptyList(),
+                                trialSegments: List<SpeakerSegment> = emptyList()): Utterance? {
         if (session != sessionId) return null
         val u = items[id] ?: return null
         return u.copy(speaker = speaker, segments = segments, speakerState = speakerState,
-            speakerScore = speakerScore, speakerPreview = speakerPreview).also { items[id] = it }
+            speakerScore = speakerScore, speakerPreview = speakerPreview,
+            speakerCandidates = speakerCandidates, trialSegments = trialSegments).also { items[id] = it }
+    }
+
+    @Synchronized fun setManual(session: String, id: String, speaker: String?): Utterance? {
+        if (session != sessionId) return null
+        val u = items[id] ?: return null
+        return u.copy(manualSpeaker = speaker).also { items[id] = it }
+    }
+
+    /** Late trial split only; the whole-sentence label, status and hints stay as they are. */
+    @Synchronized fun setTrial(session: String, id: String, trialSegments: List<SpeakerSegment>): Utterance? {
+        if (session != sessionId) return null
+        val u = items[id] ?: return null
+        return u.copy(trialSegments = trialSegments).also { items[id] = it }
     }
 
     @Synchronized fun neighbors(ids: Collection<String>, before: Int = 4, after: Int = 1): List<Utterance> {

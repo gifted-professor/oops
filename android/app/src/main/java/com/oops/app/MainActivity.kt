@@ -14,6 +14,7 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.RenderProcessGoneDetail
 import androidx.activity.ComponentActivity
+import androidx.activity.OnBackPressedCallback
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
@@ -77,6 +78,15 @@ class MainActivity : ComponentActivity() {
             settings.allowContentAccess = false
         }
         setContentView(webView)
+        // Back closes the open sheet, then steps back through the pages; only from the home page it leaves the app
+        // (moveTaskToBack: a running capture and its UI stay as they are).
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                webView.evaluateJavascript("(window.OopsBack ? window.OopsBack() : false)") { handled ->
+                    if (handled != "true") moveTaskToBack(true)
+                }
+            }
+        })
         bridge = WebBridge(webView, ::onBridgeMessage) // before any callback below can use it
 
         // The page draws edge to edge and pads itself with these (CSS px).
@@ -204,16 +214,27 @@ class MainActivity : ComponentActivity() {
                 "history.list" -> OopsEngine.history("list")
                 "history.open" -> OopsEngine.history("open", p.getString("sessionId"))
                 "history.delete" -> OopsEngine.history("delete", p.getString("sessionId"), p.optBoolean("confirm"))
+                "projects.list" -> OopsEngine.projects()
+                "project.open" -> OopsEngine.projects(p.getString("name"))
+                "meeting.project" -> OopsEngine.setMeetingProject(p.getString("sessionId"), p.getString("project"))
+                "history.rename" -> OopsEngine.renameMeeting(p.getString("sessionId"), p.getString("title"))
                 "history.search" -> OopsEngine.history("search", p.getString("query"))
                 "digest.open", "commitment.open" -> OopsEngine.openCommitment(p.getString("utteranceId"))
-                "clip.play" -> OopsEngine.playClip(p.getString("key"), p.getLong("startMs"), p.getLong("endMs"))
+                "clip.play" -> OopsEngine.playClip(p.getString("key"), p.getLong("startMs"), p.getLong("endMs"),
+                    p.optString("sessionId").ifBlank { null })
                 "clip.stop" -> OopsEngine.stopClip()
+                "clip.remote" -> OopsEngine.playRemoteClip(p.getString("key"), p.getString("sessionId"), p.getLong("startMs"), p.getLong("endMs"))
+                "speaker.correct" -> OopsEngine.correctSpeaker(p.getString("sessionId"), p.getString("utteranceId"),
+                    if (p.isNull("speaker")) null else p.getString("speaker"))
+                "review.set" -> OopsEngine.review(p.getString("sessionId"), p.getString("utteranceId"), p.getJSONObject("fields"))
+                "tasks.list" -> OopsEngine.tasks(p.optBoolean("mine"), p.optString("status").ifBlank { "open" })
                 "recall.save" -> OopsEngine.saveRecall(
                     p.getString("cardId"), p.getJSONArray("utteranceIds").strings(), p.getLong("startMs"), p.getLong("endMs"),
                 )
                 "recall.dismiss" -> OopsEngine.dismissRecall(p.optString("cardId"))
                 "saved.list" -> bridge.send("saved.items", BridgeJson.saved(OopsEngine.savedItems()))
                 "action.draft" -> OopsEngine.draftAction(p.getString("cardId"), p.getJSONArray("utteranceIds").strings())
+                "action.ownerFeedback" -> OopsEngine.recordOwnerFeedback(p)
                 "action.confirm" -> OopsEngine.confirmAction(
                     draftId = p.getString("draftId"),
                     who = p.optString("who"),
@@ -221,6 +242,7 @@ class MainActivity : ComponentActivity() {
                     whenIso = p.optString("whenIso").ifBlank { null },
                     whenRaw = p.optString("whenRaw").ifBlank { null },
                     constraint = p.optString("constraint").ifBlank { null },
+                    ownerSelectionSource = p.optString("ownerSelectionSource", "user"),
                 )
                 "action.status" -> OopsEngine.queryAction(p.getString("draftId"))
                 "testAudio.pick" -> audioPicker.launch(arrayOf("audio/wav", "audio/x-wav", "audio/*"))

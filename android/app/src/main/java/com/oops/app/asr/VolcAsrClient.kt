@@ -28,6 +28,9 @@ class VolcAsrClient(
         fun onPartial(text: String, startMs: Long, endMs: Long)
         fun onFinal(utterance: RawUtterance)
 
+        /** Every raw server response payload, before parsing (kept as a raw asset). */
+        fun onRaw(payload: String) {}
+
         /** Called exactly once. [error] is null after a normal [finish]; [fatal] means retrying won't help. */
         fun onClosed(error: String?, fatal: Boolean)
     }
@@ -118,6 +121,7 @@ class VolcAsrClient(
                     report("ASR 错误 ${message.code}: ${message.message}", fatal = false)
                 }
                 is ServerMessage.Response -> {
+                    runCatching { listener.onRaw(message.payload) }
                     val update = runCatching { VolcResult.parse(message.payload) }.getOrNull()
                     update?.finals?.forEach { u ->
                         // `single` mode sends each definite sentence once; guard against repeats anyway.

@@ -5,13 +5,13 @@
 
 音频坐标统一约定：ASR 返回连接内时间，App 先加该连接的 `baseMs`；App 内部及所有 HTTP 音频时间字段均为会话坐标。`clip_start_ms` 是上传 PCM 第一个样本的会话时间。后端只在模型计算中使用 `t - clip_start_ms`，响应再加回。草稿的 `reference_time` 仍是 ISO 8601 绝对时间。
 
-候选、草稿原话及上下文可增加 `tag`、`words:[{text,start_ms,end_ms}]`、`segments:[{start_ms,end_ms,text,speaker,score,source,approx}]`；旧后端可忽略新增字段。原文必须完整保留，分段文本拼接须等于 ASR 定稿全文，起草和保存按原句 ID 从会话索引取最新信息。
+候选、草稿原话及上下文可增加 `tag`、`words:[{text,start_ms,end_ms}]`、`segments:[{start_ms,end_ms,text,speaker,score,source,approx,confidence,tier,overlap,candidates}]`；旧后端可忽略新增字段。原文必须完整保留，分段文本拼接须等于 ASR 定稿全文，起草和保存按原句 ID 从会话索引取最新信息。历史会议同步也保留分段；坏段降为未知，整组拼接或边界失效时整句降为未知，不能删掉原文。
 
 ## 服务地址与鉴权
 
 当前部署 base URL：`https://giftedprofessor.xyz/oops-meeting`，例如确认地址为 `/oops-meeting/v1/actions/confirm`。部署后端监听回环，由 HTTPS 入口转发；`OOPS_API_TOKEN` 设置后所有接口（含 GET `/healthz`）要求 `Authorization: Bearer <服务访问凭据>`，鉴权失败返回 401 `UNAUTHORIZED`，不会触发飞书调用。
 
-Android 设置按规范化 base URL 保存访问凭据；恢复旧操作时使用该操作原地址的凭据。客户端仅通过 HTTPS 或本机回环发送凭据；H5 状态只暴露 `hasBackendToken`，不返回凭据。`GET /healthz` 返回 `status/jev/voiceprint/feishu/segments_validated`，不返回飞书授权或密钥。
+Android 设置按规范化 base URL 保存访问凭据；恢复旧操作时使用该操作原地址的凭据。客户端仅通过 HTTPS 或本机回环发送凭据；H5 状态只暴露 `hasBackendToken`，不返回凭据。`GET /healthz` 返回 `status/jev/voiceprint/feishu/segments_validated/strict_a_enabled/self_owner_enabled/named_owner_enabled`，不返回飞书授权或密钥。四个归属门禁首发全部关闭。
 
 服务器 `--state-dir /var/lib/oops/backend` 持久化映射与确认操作。新 Oops 组织的四人名单为黄丽萍、江古月、洪玉麟、林春源，Lydia 是黄丽萍的别名。`OOPS_STRICT_PEOPLE=1` 时未配置负责人会明确报错。
 
@@ -64,6 +64,13 @@ Jev 适配建议（已核对 [官方 Choice 文档](https://docs.typesafe.ai/pri
 ```json
 {
   "who":null,
+  "owner":null,
+  "suggested_owner":null,
+  "owner_source":"none",
+  "owner_confidence":null,
+  "tier":"C",
+  "reason":"承诺短语的说话人未知",
+  "owner_candidates":[],
   "what":"把方案发给对方",
   "when":{"iso":"2026-10-09","raw":"周五前"},
   "constraint":"预算控制在十万以内",
@@ -71,6 +78,8 @@ Jev 适配建议（已核对 [官方 Choice 文档](https://docs.typesafe.ai/pri
 }
 ```
 无法解析时间时 `when` 可以为 null，或 `{ "iso":null, "raw":"原始时间措辞" }`。负责人不确定时返回 null，让用户选择。Jev 负责选择／判断；自由文本草稿提取需要独立 LLM 或规则实现。
+
+`who` 兼容字段等于 `owner`。只有共同严格门禁及对应本人/点名门禁通过，才返回 A 档非空 `owner`；一键人工确认后才调用 confirm。B 仅返回 `suggested_owner`，界面可点选且不预填；C 留空。`owner_source` 为 `named/self/none`，`owner_confidence` 是独立校准的承诺短语/行动绑定正确概率，未拟合为 null。候选最多两人、分数降序，仅表示相似度。多承诺返回 `commitments` 中的原句 ID、字区间和类型，并提示拆成独立行动。晚到模型结果不得覆盖用户编辑的负责人、事项、日期、约束或已提交确认快照。
 
 ## 3. POST /v1/actions/confirm
 
@@ -160,7 +169,9 @@ App 可选接口重试策略：IO、429、5xx 最多重试 2 次，间隔 1、3 
   "utterance_id":"u2", "speaker":"洪玉麟", "score":0.81, "runner_up":0.42,
   "engine":"campplus-zh", "segments_validated":true,
   "segments":[{"start_ms":11700,"end_ms":16100,"text":"我周五前把方案发给你。",
-    "speaker":"洪玉麟","score":0.81,"source":"voiceprint","approx":false}]
+    "speaker":"洪玉麟","score":0.81,"source":"voiceprint","approx":false,
+    "confidence":null,"tier":"B","overlap":false,
+    "candidates":[{"name":"洪玉麟","score":0.81},{"name":"林春源","score":0.42}]}]
 }
 ```
 
@@ -168,9 +179,27 @@ App 可选接口重试策略：IO、429、5xx 最多重试 2 次，间隔 1、3 
 
 `source` 为 `voiceprint`（达到普通/短段对应阈值，先锁定，Jev 不可改）、`voiceprint+context`（未锁定段，经 Jev 概率 ≥0.7 且声纹前两名守卫通过）、或 null（未知）。`approx` 表示词/原文时间映射是否近似，不能用近似切字自动解析“我”的负责人。Jev 批量裁决只包含未锁定段，故障保持未知。
 
-本地后端默认关闭拆分和 self 自动填人。只有 `voiceprint.py split-eval` 在冻结参数后的独立验收集通过，生成 `models/voiceprint/split-validation.json`，且相关判断代码、模型、注册声纹、标注集和人工真值指纹仍一致，后端重启后才允许启用。代码指纹只覆盖拆分/负责人/评估判断及其源代码依赖的规范化 AST，不含飞书与召回等无关代码；失效原因输出到后端日志。未通过时返回 `segments:[], segments_validated:false`。负责人自动填写另需独立验收集至少 15 个真实 self 案例，覆盖率 ≥60%、准确率 ≥95%，自动填人不超过 20 条时必须零错误；失败时拆分可启用而 self 仍留空。
+`confidence` 是段内非重叠可辨认字中至少 90% 归属预测说话人的校准概率，不等于整段所有字正确；未拟合为 null。余弦 `score/runner_up/candidates.score` 与 Jev 原始概率都不能替代。有效名字可为 B+null，A 必须具备校准概率。重叠字固定 `overlap=true,speaker=null,tier=C`，给出最多两名候选；近似、未知不能进入 A。
 
-负责人先区分明确点名/self/未知；点名须有指派关系，“发给某人”不算。self 必须只有一个明确的第一人称承诺，承诺短语完整位于一个 `source=voiceprint, approx=false` 的分段中，并已通过自动填人验收。跨段、多个承诺、近似、Jev 辅助声纹和未知均留空，交由用户选择。
+后端默认关闭拆分显示、严格 A、本人和点名预填。开发集冻结后，完整保留集只做一次最终判定；精确单侧 95% 错名上界在段和含 A 段的句两个单位均 ≤2% 才可启用严格 A。本人和点名的行动绑定准确率下界各需 ≥95%，本人覆盖率还需 ≥60%。20 条零错的错率上界约 13.9%，只能返回证据不足。拆分最低线通过而严格证据不足时，只显示建议。未通过显示门禁时返回 `segments:[],segments_validated:false`。
+
+schema 2 验收核对判定代码及依赖、两种模型、校准器、线上实际生效声纹和冻结/消费证据。重新录入声纹会清空缓存、先验并关闭归属开关；不能复用旧验收。线上验收元数据由 Mac 完整核验后签名，服务器固定可信签名并再次检查当前指纹；音频与人工标注保持本机。旧 schema 报告不会启用 v2。
+
+负责人先区分明确点名/self/未知；点名须有指派关系，“发给某人”不算。self 必须只有一个明确的第一人称承诺，承诺短语完整位于一个非重叠、非近似的 A 段中，且独立 owner 概率及门禁通过。集体承诺、跨段、多个承诺、重叠、近似和未知留空，交由用户选择。模型 A 显示“高可信”，人工核对才显示“已确认”。
+
+### 句内拆分延后返回与 `POST /v1/speaker/split`（2026-10-08）
+
+句内拆分（试验）在服务器上要几秒，整句名字不应等它。请求带 `"split":"deferred"` 时，`/v1/speaker` 只做整句识别就返回，响应加 `"split_pending":true`（句子不足 `OOPS_SPLIT_MIN_MS`，默认 3000 毫秒，则不拆分、不带该字段）；拆分交给服务器后台单线程计算。不带 `split` 的旧请求保持同步行为，响应里直接带 `trial_segments`，所以新旧 App 与新旧服务器可任意搭配。
+
+```json
+POST /v1/speaker/split   {"session_id":"session-example","utterance_id":"u2"}
+→ {"utterance_id":"u2","status":"done|pending|unavailable","trial_segments":[...],
+   "timing_ms":{"split_queue_ms":12,"split_ms":3900}}
+```
+
+不重传音频。服务器最多等 8 秒：算完返回 `done`；仍在算返回 `pending`，App 再问一次（最多 3 次）；从未提交、已被淘汰（最近 256 条）、计算失败或排队超过 16 条返回 `unavailable`，App 保留整句标签。`trial_segments` 与同步模式逐字段相同。App 收到后只更新这一行的拆分字段，不改整句名字，也不同步、不进入负责人判断。
+
+`/v1/speaker` 响应另带 `timing_ms`（`identify_ms`，同步模式还有 `split_ms`）。相同的 `session_id + utterance_id + 音频哈希 + 模式` 重试直接命中服务器缓存，不重新计算。`/v1/utterances` 的响应带 `timing_ms.jev_ms/clause_ms`，`/v1/actions/draft` 带 `timing_ms.deepseek_ms`；这些字段仅供量延迟，App 不依赖。`/healthz` 另带 `jev_stats`（自进程启动：`calls/retries/failures/tag_fallbacks`），打标签时 Jev 失败会在 7 秒总预算内重试一次（超时、429、5xx 才重试，4xx 不重试），仍失败才退回关键词规则并计入 `tag_fallbacks`。
 
 ## 本场承诺索引
 
@@ -202,7 +231,7 @@ App 可选接口重试策略：IO、429、5xx 最多重试 2 次，间隔 1、3 
 
 重复提交同一成员的 `sample_id` 返回原保存结果，不重复更新；版本不符拒绝。网页使用本人 `profile_revision`，不同成员可从同一次目录读取结果分别保存；同一人的过期版本仍拒绝覆盖。App 继续支持全局 `revision`。保存/删除使已有拆分及 self 自动填人验收失效；不能用历史 DJI 验收打开新注册声纹的闸门。
 
-`POST /v1/voiceprints/test` 输入 `sample_rate:16000/pcm_base64`（0.5–30 秒），只返回 `speaker/closest/score/margin/reason/scores/accept/required_margin/quality`，不更改声纹。`quality` 含 `seconds/active_seconds/clipped_ratio`。匹配门槛仍为原配置，未为了录入降低阈值。
+`POST /v1/voiceprints/test` 输入 `sample_rate:16000/pcm_base64`（0.5–30 秒），只返回 `speaker/closest/score/margin/reason/scores/accept/required_margin/quality`，不更改声纹。`quality` 含 `seconds/active_seconds/clipped_ratio`。整句匹配门槛自 2026-10-09 起默认 0.42（`OOPS_SPEAKER_ACCEPT` 可改），前两名差距仍要求 ≥0.05；依据是一场人工标注会议（Mac 收音，77 句单人说话）上覆盖率从 59% 升到 81%，错名数不变，暂定，待保留场次确认。
 
 `POST /v1/voiceprints/delete` 输入 `name/confirm:true/expected_revision`，App 服务凭据才允许删除。删除后重启不会恢复 seed 声纹；全部删除后仍可再次录入。
 
@@ -243,7 +272,7 @@ pyannote 3.0 局部编号不作为身份，不跨不连续发言共用声纹判�
 
 ### 会议文字接口
 
-全部要求 App 全权限凭据，声纹邀请凭据返回 403；没有有效凭据返回 401。公网部署仍需设置 `OOPS_API_TOKEN`。文件存于 `<state-dir>/meetings/<session_id>.json`，目录 0700、文件 0600，带锁、原子写入。默认保留 30 天，`OOPS_MEETING_RETENTION_DAYS` 可调整；读取/同步时清理过期文字。删除的编号保留无文字标记，阻止延迟请求重建该场。
+全部要求 App 全权限凭据，声纹邀请凭据返回 403；没有有效凭据返回 401。公网部署仍需设置 `OOPS_API_TOKEN`。文件存于 `<state-dir>/meetings/<session_id>.json`，目录 0700、文件 0600，带锁、原子写入。默认长期保留（`OOPS_MEETING_RETENTION_DAYS=0`），只在用户删除会议时删除；设为正数天数才会在读取/同步时清理过期文字。删除的编号保留无文字标记，阻止延迟请求重建该场。
 
 | 接口 | 请求/响应 |
 |---|---|
@@ -252,9 +281,47 @@ pyannote 3.0 局部编号不作为身份，不跨不连续发言共用声纹判�
 | GET /v1/meetings/{id} | 元数据、按时间排列的 utterances、notices、digest 四类原话、按 operations.request.session_id 关联的 tasks |
 | POST /v1/meetings/search | {query:1–500字} → {items:[id,text,start_ms,end_ms,speaker,tag,session_id,started_at,prob],engine} |
 | POST /v1/meetings/delete | {session_id,confirm:true} → {deleted:true}；重复删除幂等，迟到同步返回 400 |
+| POST /v1/meetings/rename | {session_id,title:0–40字} → {session_id,title,title_source}；空字符串恢复自动名称 |
+| POST /v1/meetings/project | {session_id,project:0–30字} → {session_id,project}；空字符串移出项目。存在会议文件 `project`，同步不覆盖 |
+| GET /v1/projects | {items:[{name,meeting_count,confirmed_decisions,last_started_at}]}，最近有会的在前 |
+| GET /v1/projects/{名称，URL 编码} | {name,meetings,decisions:[已确认的决定/约束，带 session_id、started_at、meeting_title、speaker],unreviewed_decisions,tasks}；tasks 同 `/v1/tasks` 的条目，限这个项目的会议 |
+| POST /v1/meetings/review | {session_id,utterance_id,speaker?,verdict?,owner?,by?} → {session_id,utterance_id,review}；人工核对，见下 |
+
+**人工核对（2026-10-09）**：`speaker` ∈ 团队成员或 `other`/`multi`/`unclear`，`owner` ∈ 团队成员，`verdict` ∈ `confirmed`/`rejected`；只改请求里出现的字段，传 `null` 清除该字段，全部清空则删除这条核对。核对单独存在会议文件的 `reviews` 里，同步永远不会覆盖；`GET /v1/meetings/{id}` 把它叠加为每句的 `review` 字段，模型的 `speaker` 原样保留以便对比。会议不存在或已删除返回 404。会议进行中改说话人，服务器本场的任务草稿立即改用人工说话人（优先于句内拆分）找负责人；仍然只是"建议"，不越过负责人验收开关。核对时界面会显示模型猜测，所以这些结果不是盲标，只能进开发集，不能当验收集。
+
+**项目与跨会议冲突（2026-10-09）**：`POST /v1/notices` 的 conflict 判断，本场会议有项目时，取同一项目其他会议里人工确认过的决定和约束（最多 30 条，新会议在前）全部交给 Jev，不再按关键词预选，所以说法不同的矛盾也能找到；项目里还没有确认过的，退回原来的做法（最近 10 场会议、字面相近、未被驳回）。返回的 `with` 增加 `meeting_title` 和 `confirmed`，手机据此显示"可能与已确认的决定冲突""MM/dd《会议名》已确认"或"（未核对）"。
+
+**会议名称（2026-10-09）**：`GET /v1/meetings/{id}` 返回 `display_title` 和 `title_source`，列表每项返回 `title`/`title_source`。优先级：手动改名（`manual`，存在会议文件 `title`，同步不覆盖）→ 议程目标（`agenda`）→ AI 概括（`generated`）→ 不足 5 句时显示"简短会议"（`short`）→ 按原话自动取（`auto`：第一条未被驳回的决定/待办/约束，人工确认过的优先，去掉"那、就是、嗯"等开头，截 18 字；都没有时取最长一句）→ 无（`none`）。AI 概括：会议有 `ended_at` 或开始超过 3 小时、至少 5 句、没有手动名称和议程目标时，打开会议列表会在后台逐场请求 DeepSeek（整场文字最多 6000 字，标出未驳回的决定/待办/约束），回答 2–16 字才采用，连同当时句数存在会议文件 `auto_title`；句数变化后重新生成，生成期间文字变了则丢弃。没有 DeepSeek 时只用按原话自动取。
+
+**会后核对队列**：`GET /v1/meetings/{id}` 另返回 `review_queue: [{kind, id}]`，顺序为待办（`commitment` 且未核对、未建飞书任务）→ 决定（`decision` 且未核对）→ 说话人（没有说话人、未人工改过、去掉标点后至少 4 个字；待办和决定的句子排在前面）。会议列表每项加 `review_pending: {commitment, decision, speaker}`。被核对为 `rejected` 的句子不再出现在 `digest` 和跨会议冲突比对里，模型标签原样保留。`scripts/review_truth.py <会议文件>` 把核对结果转成 `task_eval.py` 的真值格式（标 `blind:false`、`scope:"model_candidates_only"`）：只问过模型标出的句子，模型漏掉的任务不在里面，所以只能看精确率和负责人，召回要用 `label_meeting.py` 的盲标。
 
 句子/提醒按 id upsert；会议上限 20,000 句及 2,000 条提醒。同步字段采用白名单，仅文字、正式标签、说话人、提醒和议程；不保存音频、词时间戳、试验 preview 或额外上传字段。每句最多 2,000 字，编号 `[A-Za-z0-9_-]{1,100}`，开始日期必须含时区且创建后不可更改。历史待办另有 owner_hint/when_raw/task_status/task_url；self 仍不自动填负责人。搜索预选最多 120 句交给 Jev，失败时仅按字面重合找原话。历史打开与搜索在 App 中只读，不回听、不创建任务。
 
 App 每场队列绑定开始时的后端；20 秒或累积 30 句发送，同一队列单请求，停止时标记 ended_at 并最终发送。失败指数退避，404/501 停用，不合法数据等永久错误停止队列。队列在内存中，进程被系统结束时尚未成功同步的文字可能丢失；已同步内容仍在服务器。`memorySync` 默认开，可关闭自动发送。部署/安装前须按本轮计划确认四位成员同意文字上传。
 
 `healthz` 新增 `notices:true/meetings:true`，只表示接口存在，不表示 Jev 中文判断已验收。
+
+
+## 任务列表 `GET /v1/tasks?assignee=<名>&status=open|done|all`（2026-10-09）
+
+列出经确认已在飞书创建的任务，按创建时间倒序。仅 App 全权限凭据。每条含 `op_id、what、who`（飞书里的实际负责人，读不到时用草稿负责人）、`who_drafted、when、quote、utterance_ids、session_id、meeting{started_at,goal}、created_at、url、overdue`，以及 `feishu`：
+
+- `state`：`open`／`done`／`deleted`（飞书里已删除）／`unknown`；另有 `due_ms`、`completed_at_ms`、`assignee`；
+- 状态在有人请求时用 `lark-cli task tasks get` 回读，缓存 5 分钟，不做后台轮询；读取失败时返回上次的结果并标 `stale:true`，从没读到过则为 `unknown`；
+- `status=open` 也包含 `unknown`，避免读不到时任务被悄悄藏起来；dry-run 创建的任务一律 `unknown`。
+
+2026-10-09 在香港服务器实测：Oops 授权账号能回读它创建、指派给他人的任务（创建者不在成员里也可以），删除后返回 `not_found`（1470404）。
+
+## 原始录音与转写存档 `/v1/recordings/{session_id}`
+
+原始录音、逐句定稿和流式识别原始返回是团队资产：手机每场默认保存（设置可关），会后由 App 自动上传，服务器长期保留，删除会议时一并删除。仅 App 全权限凭据可用，声纹邀请凭据 403，无凭据 401。存于 `<state-dir>/recordings/<session_id>/`（目录 0700、文件 0600）。
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/manifest` | `{"files":[{"name","size","sha256"}],"meta":{}}`；`name` ∈ `audio.pcm`（16 kHz 单声道 s16le，会话时间轴，断流补静音）、`finals.jsonl`、`asr.jsonl`、`timing.jsonl`（每句各阶段耗时，`scripts/latency_report.py` 汇总；旧版 App 没有）、`meta.json`（含 `audio_ended_at`、`bytes`、`capped`）。返回 `{"complete","received":{name:bytes}}`，用于断点续传；清单变化时超出新大小的文件从零重传 |
+| PUT | `/{name}?offset=N` | 原始字节分块（≤1.1 MB），头 `X-Content-SHA256` 为本块哈希；`offset` 必须等于已收字节，否则 409 并返回 `received` |
+| POST | `/complete` | 逐个整文件复算 SHA-256；不一致的文件删除并 409（`received:0`）；全部一致写 `complete.json` |
+| GET | （无后缀） | 存档状态 |
+| GET | `/clip?start_ms=A&end_ms=B` | 截取一段原声，返回 `audio/wav`（16 kHz 单声道），前后各多 300 ms；最长 30 秒。还没有录音 404，这一段还没传到 409，参数无效 400 |
+
+已删除会议的编号返回 410，延迟重试不能重建录音。手机只在 `complete` 成功后写 `<id>.uploaded`，只清理已确认上传且超过 7 天（或超出 2 GB）的本地副本；未上传成功的录音永不自动删除。Mac 每晚 03:30 由 `local.oops.archive-pull` 用 rsync 镜像服务器 `recordings/` 与 `meetings/` 到 `/Volumes/GPFS/Users/a1234/oops-archive`（镜像删除）。

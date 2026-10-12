@@ -55,10 +55,11 @@ class UtteranceAnalysisTest {
             .put("segments", json.getJSONArray("segments")))
         assertEquals(listOf(segment), response.segments)
         val u = com.oops.app.buffer.Utterance(candidate.id, candidate.startMs, candidate.endMs, candidate.text, candidate.speaker)
-        assertTrue(response.usableSegments(u).isEmpty()) // cannot enable an unevaluated backend response
+        assertNull(response.usableSegments(u).single().speaker) // unevaluated identity is suppressed, text retained
+        assertEquals(u.text, response.usableSegments(u).single().text)
         assertEquals(listOf(segment), response.copy(segmentsValidated = true).usableSegments(u))
-        assertTrue(response.copy(segmentsValidated = true, segments = listOf(segment.copy(text = "改写原文"))).usableSegments(u).isEmpty())
-        assertTrue(response.copy(segmentsValidated = true, segments = listOf(segment.copy(endMs = u.endMs + 1))).usableSegments(u).isEmpty())
+        assertEquals(u.text, response.copy(segmentsValidated = true, segments = listOf(segment.copy(text = "改写原文"))).usableSegments(u).single().text)
+        assertNull(response.copy(segmentsValidated = true, segments = listOf(segment.copy(endMs = u.endMs + 1))).usableSegments(u).single().speaker)
         assertNull(ApiJson.tagResult(JSONObject("""{"utterance_id":"u1","tag":"uncertain","prob":null,"engine":"rules"}""")).prob)
         assertTrue(runCatching { ApiJson.tagResult(JSONObject("""{"utterance_id":"u1","tag":"bad","prob":1}""")) }.isFailure)
     }

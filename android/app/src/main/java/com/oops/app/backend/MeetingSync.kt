@@ -16,24 +16,40 @@ class MeetingSync(val sessionId: String, private val startedAt: String, private 
     private var nextAttempt = 0L
     private var failures = 0
     private var sending = false
+    /** The server refused a batch: sentences stop for good, but the meeting's end is still sent on its own. */
     var failed = false
         private set
-    @Synchronized fun halt() { sending = false; failed = true }
+    private var endAbandoned = false
+    @Synchronized fun halt(endToo: Boolean = false) { sending = false; failed = true; if (endToo) endAbandoned = true }
+    /** True while the end of the meeting has not reached the server; the bot needs it to send the minutes. */
+    @Synchronized fun endPending() = endedAt != null && revision != ackRevision && !endAbandoned && !unsupported
+    /** Nothing to send for now; stopping the meeting (which restarts the worker) may add its end. */
+    @Synchronized fun finished() = unsupported || failed && !endPending()
     var unsupported = false
         private set
     @Synchronized fun upsert(candidate: Candidate) {
-        // Explicit allowlist: never serialize PCM, words, preview or experimental fields.
+        // Explicit allowlist: production attribution only, never PCM, words or preview.
         val j = JSONObject().put("id", candidate.id).put("text", candidate.text)
             .put("start_ms", candidate.startMs).put("end_ms", candidate.endMs)
             .put("speaker", candidate.speaker ?: JSONObject.NULL).put("tag", candidate.tag ?: JSONObject.NULL)
+            .put("segments", JSONArray(candidate.segments.map(ApiJson::segment)))
         utterances[candidate.id] = j.toString()
     }
     @Synchronized fun notice(j: JSONObject) { notices[j.getString("id")] = j.toString() }
     @Synchronized fun agenda(j: JSONObject) { val value = j.toString(); if (value != agenda) { agenda = value; revision++ } }
-    @Synchronized fun stop(at: String) { endedAt = at; revision++ }
+    /** The end goes out at once, not after a backoff left over from an earlier failure. */
+    @Synchronized fun stop(at: String) { endedAt = at; revision++; nextAttempt = 0 }
     @Synchronized fun pendingCount() = utterances.size + notices.size + if (revision != ackRevision) 1 else 0
     @Synchronized fun batch(now: Long, force: Boolean = false): Batch? {
-        if (sending || unsupported || failed || pendingCount() == 0 || now < nextAttempt) return null
+        if (sending || unsupported || pendingCount() == 0 || now < nextAttempt) return null
+        if (failed) {
+            if (!endPending()) return null
+            sending = true; lastAttempt = now
+            // End only, and no agenda: the server keeps the one it has.
+            val body = JSONObject().put("session_id", sessionId).put("started_at", startedAt).put("time_zone", timeZone)
+                .put("ended_at", endedAt).put("utterances", JSONArray()).put("notices", JSONArray())
+            return Batch(body, emptyMap(), emptyMap(), revision)
+        }
         if (!force && utterances.size < 30 && now - lastAttempt < 20_000) return null
         sending = true; lastAttempt = now
         val u = utterances.entries.take(500).associate { it.toPair() }

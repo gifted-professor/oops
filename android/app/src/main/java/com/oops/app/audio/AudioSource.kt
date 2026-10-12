@@ -28,6 +28,9 @@ interface AudioSource {
         /** False when the external input disconnects; received PCM marks it ready again. */
         fun onReady(ready: Boolean) {}
 
+        /** True while the OS silences this input because another app uses the microphone. */
+        fun onSilenced(silenced: Boolean) {}
+
         fun onError(error: Throwable)
     }
 

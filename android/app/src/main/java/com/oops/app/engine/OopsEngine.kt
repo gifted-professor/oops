@@ -75,13 +75,19 @@ object OopsEngine {
     private const val CLIP_PAD_MS = 500L
     /** Shorter sentences carry too little voice to identify reliably. */
     private const val SPEAKER_MIN_MS = 1_000L
+    private const val SPLIT_POLLS = 3
     private const val TEST_WAV = "test/dialog.wav"
+    private val MANUAL_OTHER = setOf("other", "multi", "unclear")
+    private const val REVIEW_RETRIES = 3
+    private const val REVIEW_RETRY_MS = 25_000L
 
     private lateinit var app: Application
     lateinit var settings: Settings
         private set
     private lateinit var store: SavedClipStore
     private lateinit var operations: ActionOperationStore
+    private lateinit var ownerFeedback: com.oops.app.store.OwnerFeedbackStore
+    private val ownerFeedbackJobs = kotlinx.coroutines.channels.Channel<() -> Unit>(kotlinx.coroutines.channels.Channel.UNLIMITED)
     private val submitted = ConcurrentHashMap<String, ActionOperationStore.Operation>()
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -89,6 +95,11 @@ object OopsEngine {
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(10, TimeUnit.SECONDS)
         .callTimeout(10, TimeUnit.SECONDS)
+        // Per-request network phases for the calls that decide how fast a name or tag appears.
+        .eventListenerFactory {
+            com.oops.app.backend.NetTimer({ p -> p.startsWith("/v1/speaker") || p == "/v1/utterances" || p.startsWith("/v1/actions/draft") },
+                { path, fields -> timing(sessionId, path, "net", *fields.map { it.key to it.value }.toTypedArray()) })
+        }
         .build()
 
     /** The ASR socket can stay silent through long pauses: no read timeout. */
@@ -134,10 +145,14 @@ object OopsEngine {
     private var previewResultMs = 0L
 
     @Volatile private var sessionId = ""
+    @Volatile private var recorder: com.oops.app.store.SessionRecorder? = null
     @Volatile private var level = 0f
 
     private val cards = ConcurrentHashMap<String, RecallCard>()
     private val drafts = ConcurrentHashMap<String, ActionDraft>()
+    private val ownerHints = ConcurrentHashMap<String, com.oops.app.backend.DraftResponse>()
+    private val hintEpochs = ConcurrentHashMap<String, Long>()
+    private val suggestionEpochs = ConcurrentHashMap<String, Long>()
     private val opIds = ConcurrentHashMap<String, String>() // draftId → op_id, reused on retry
     private val inFlight: MutableSet<String> = ConcurrentHashMap.newKeySet()
     private val recallLatencies = ArrayDeque<Long>()
@@ -155,6 +170,11 @@ object OopsEngine {
         }.getOrDefault(com.oops.app.notice.Agenda()))
         store = SavedClipStore(File(application.filesDir, "saved"))
         operations = ActionOperationStore(File(application.filesDir, "actions"))
+        ownerFeedback = com.oops.app.store.OwnerFeedbackStore(File(application.filesDir, "owner-feedback"))
+        scope.launch(Dispatchers.IO) {
+            for (job in ownerFeedbackJobs) runCatching(job)
+                .onFailure { Log.w(TAG, "local owner feedback unavailable: ${it.javaClass.simpleName}") }
+        }
         operations.list().forEach { operation ->
             val draft = operation.request.draft
             submitted[draft.draftId] = operation
@@ -162,6 +182,8 @@ object OopsEngine {
             opIds[draft.draftId] = operation.request.opId
         }
         rebuildApi()
+        recoverUnfinishedMeetings() // before any capture can start, so the new session is never mistaken for one
+        watchNetwork()
         updateAssistanceState()
         _state.update {
             it.copy(
@@ -170,6 +192,69 @@ object OopsEngine {
                 testWavName = settings.testWavName,
                 remoteAddress = settings.remoteAddress,
             )
+        }
+        scope.launch {
+            delay(5_000)
+            while (isActive) {
+                scheduleUpload()
+                delay(15 * 60_000L)
+            }
+        }
+    }
+
+    /** A meeting the app never stopped still tells the server it ended, so its minutes go out (see [SessionRecovery]). */
+    private fun recoverUnfinishedMeetings() {
+        val dir = File(app.filesDir, "recordings")
+        val ended = runCatching { com.oops.app.store.SessionRecovery.scan(dir, active = null) }
+            .onFailure { Log.w(TAG, "unfinished meeting scan failed: ${it.message}") }.getOrDefault(emptyList())
+        if (ended.isEmpty() || !settings.memorySync) return
+        val client = api
+        scope.launch(Dispatchers.IO) {
+            for ((id, at) in ended) {
+                try {
+                    client.syncMeeting(com.oops.app.store.SessionRecovery.endBody(id, at))
+                    com.oops.app.store.SessionRecovery.markSent(dir, id)
+                    Log.i(TAG, "unfinished meeting $id: end $at sent")
+                } catch (error: CancellationException) { throw error }
+                catch (error: Exception) {
+                    // A refusal (e.g. the meeting was deleted, or never synced) is final; anything else retries next start.
+                    if (error is com.oops.app.backend.HttpFailure && error.status in setOf(400, 409, 410, 413))
+                        com.oops.app.store.SessionRecovery.markSent(dir, id)
+                    Log.w(TAG, "unfinished meeting $id: end not sent: ${error.javaClass.simpleName}")
+                }
+            }
+        }
+    }
+
+    // ---- raw asset upload ----------------------------------------------------------------
+
+    private val uploading = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /** Finished sessions go to the team server; never while a meeting is capturing (live ASR keeps the network). */
+    fun scheduleUpload(delayMs: Long = 0) {
+        val transport = api as? com.oops.app.backend.HttpOopsApi ?: return
+        scope.launch(Dispatchers.IO) {
+            delay(delayMs)
+            if (!uploading.compareAndSet(false, true)) return@launch
+            val dir = File(app.filesDir, "recordings")
+            try {
+                val uploader = com.oops.app.store.RecordingUploader(dir, transport)
+                fun active() = if (source != null) sessionId else null
+                for (id in uploader.pending(active())) {
+                    _state.update { it.copy(recordingsPending = uploader.pending(active()).size, recordingUpload = "uploading") }
+                    if (source != null) break
+                    runCatching { uploader.upload(id) { source == null } }
+                        .onSuccess { if (it) Log.i(TAG, "recording uploaded: $id") }
+                        .onFailure { Log.w(TAG, "recording upload $id failed: ${it.message}") }
+                }
+                val left = uploader.pending(active()).size
+                _state.update { it.copy(recordingsPending = left, recordingUpload = if (left == 0) "done" else "pending") }
+                com.oops.app.store.SessionRecorder.prune(dir, keep = active())
+            } catch (error: Exception) {
+                Log.w(TAG, "recording upload pass failed: ${error.message}")
+            } finally {
+                uploading.set(false)
+            }
         }
     }
 
@@ -184,10 +269,19 @@ object OopsEngine {
             transcript.clear()
             cards.clear()
             drafts.keys.removeAll { !submitted.containsKey(it) }
+            ownerHints.clear(); hintEpochs.clear(); suggestionEpochs.clear()
             sessionId = UUID.randomUUID().toString()
             sessionIndex.reset(sessionId)
+            recorder?.closeAudio()
+            runCatching { com.oops.app.store.SessionRecorder.prune(File(app.filesDir, "recordings"), keep = null) }
+                .onSuccess { if (it.isNotEmpty()) Log.i(TAG, "pruned recordings: ${it.size}") }
+            recorder = if (!settings.recordSession) null else runCatching {
+                com.oops.app.store.SessionRecorder(File(app.filesDir, "recordings"), sessionId,
+                    org.json.JSONObject().put("session_id", sessionId).put("source", kind)
+                        .put("started_at", Instant.now().toString()))
+            }.onFailure { Log.e(TAG, "session recording unavailable", it) }.getOrNull()
             tracker = com.oops.app.notice.NoticeTracker(tracker.agenda)
-            _state.update { it.copy(syncStatus = "idle") }
+            _state.update { it.copy(syncStatus = "idle", recordingCapped = false, micBusy = false) }
             lastTopicAt = 0; lastTopicCount = 0; lastVoiceAt = -5_000
             topicEvidence.clear(); conflictPairs.clear()
             syncContext = SyncContext(com.oops.app.backend.MeetingSync(sessionId, Instant.now().toString(), java.time.ZoneId.systemDefault().id), api)
@@ -215,7 +309,9 @@ object OopsEngine {
                 asr?.cancel()
                 asr = null
                 _state.update { it.copy(capturing = false, asr = "off", sourceDetail = null, sourceReady = false) }
-                syncContext?.let { it.stopped = true; it.queue.halt(); it.job?.cancel() }
+                syncContext?.let { it.stopped = true; it.queue.halt(endToo = true); it.job?.cancel() }
+                recorder?.discard() // nothing was captured: no empty recording to upload later
+                recorder = null
                 fail("capture", "无法开始收音：${e.message}")
                 CaptureService.stop(app)
                 return
@@ -243,6 +339,7 @@ object OopsEngine {
             reconnectJob?.cancel()
         }
         src.stop()
+        recorder?.closeAudio() // finals that flush after stop are still appended
         client?.finish() // the server flushes the sentence in progress, then closes
         tickJob?.cancel()
         player.stop()
@@ -269,14 +366,18 @@ object OopsEngine {
             delay(5_000) // allow the final ASR sentence to flush
             if (stoppedSession == sessionId && stoppedTracker === tracker) {
                 val todos = sessionIndex.commitments()
-                stoppedTracker.onStop(nowMs, todos.count { com.oops.app.backend.CommitmentRules.evidence(it.text, Settings.TEAM).owner == null },
+                val pendingOwners = todos.count { u -> submitted.values.none {
+                    it.request.sessionId == stoppedSession && u.id in it.request.draft.evidence.utteranceIds } }
+                stoppedTracker.onStop(nowMs, pendingOwners,
                     todos.count { com.oops.app.backend.CommitmentRules.deadline(it.text) == null }).forEach { publishNotice(it, stoppedSession) }
+                if (pendingOwners > 0) emit(OopsEvent.Toast("$pendingOwners 条负责人待确认"))
                 checkResolutions(nowMs)
                 publishSessionSummary(stoppedSession)
             }
             stoppedSync?.let(::ensureSyncWorker)
         }
         Log.i(TAG, "capture stopped")
+        scheduleUpload(10_000) // after the last finals flush
     }
 
     private fun createAudioSource(kind: String): AudioSource = when (kind) {
@@ -333,6 +434,10 @@ object OopsEngine {
                     if (complete) finishVoiceprintRecording()
                 }
                 ring.append(pcm)
+                recorder?.let { r ->
+                    r.audio(pcm)
+                    if (r.capped && !_state.value.recordingCapped) _state.update { it.copy(recordingCapped = true) }
+                }
                 // 回听时给 ASR 送静音：外放的原声不会被再转写一遍，连接和时间轴也不断。
                 asr?.sendAudio(if (player.isPlaying) ByteArray(pcm.size) else pcm)
                 level = maxOf((Pcm.rms(pcm) * 5).toFloat().coerceAtMost(1f), level * 0.7f)
@@ -349,6 +454,7 @@ object OopsEngine {
             synchronized(pipeline) {
                 if (source !== owner) return
                 ring.appendSilence(Pcm.msToSamples(missingMs))
+                recorder?.silence(Pcm.msToSamples(missingMs))
                 resetSpeakerPreview()
                 // ASR times are relative to the audio it received, so a gap needs a fresh connection.
                 if (asrDownSinceMs == null) asrDownSinceMs = nowMs - missingMs
@@ -371,6 +477,12 @@ object OopsEngine {
                 if (source !== owner) return
                 _state.update { it.copy(sourceReady = ready) }
                 if (!ready) _state.update { it.copy(liveSpeakers = emptyList(), liveOverlap = false, liveSpeakerStatus = "waiting") }
+            }
+        }
+
+        override fun onSilenced(silenced: Boolean) {
+            synchronized(pipeline) {
+                if (source === owner && _state.value.micBusy != silenced) _state.update { it.copy(micBusy = silenced) }
             }
         }
 
@@ -498,6 +610,10 @@ object OopsEngine {
 
                 override fun onFinal(utterance: RawUtterance) = onAsrFinal(session, baseMs, utterance)
 
+                override fun onRaw(payload: String) {
+                    recorder?.takeIf { it.sessionId == session }?.let { r -> runCatching { r.asr(generation, baseMs, payload) } }
+                }
+
                 override fun onClosed(error: String?, fatal: Boolean) = onAsrClosed(generation, error, fatal)
             },
         )
@@ -519,12 +635,15 @@ object OopsEngine {
         val u = synchronized(pipeline) {
             if (session != sessionId) return
             val shifted = raw.shift(baseMs)
-            transcript.add(shifted.startMs, shifted.endMs, shifted.text, shifted.speakerId, shifted.words)
+            transcript.add(shifted.startMs, shifted.endMs, shifted.text, null, shifted.words)
                 .let { added -> if (api is MockOopsApi) added else
                     transcript.setSpeaker(added.id, added.speaker, speakerState = "pending")!! }
                 .also { sessionIndex.add(session, it) }
         }
         Log.i(TAG, "final ${u.id} [${u.startMs}-${u.endMs}] ${u.text}")
+        timing(session, u.id, "final", "final_lag_ms" to synchronized(pipeline) { nowMs - u.endMs },
+            "audio_ms" to (u.endMs - u.startMs), "filler" to com.oops.app.core.TextClean.isFiller(u.text))
+        recorder?.takeIf { it.sessionId == session }?.let { r -> runCatching { r.final(u) } }
         emit(OopsEvent.Final(u))
         syncUtterance(session, u)
         if (settings.voiceTrigger) OopsCommand.parseVoice(u.text)?.let { command ->
@@ -537,8 +656,11 @@ object OopsEngine {
                 }
             }
         }
-        tagUtterance(session, u)
-        identifySpeaker(session, u)
+        // An interjection on its own ('嗯', '呃') is hidden in the transcript and not worth a tag or voiceprint request.
+        if (!com.oops.app.core.TextClean.isFiller(u.text)) {
+            tagUtterance(session, u)
+            identifySpeaker(session, u)
+        }
     }
 
     private fun tagUtterance(session: String, u: Utterance) {
@@ -553,10 +675,15 @@ object OopsEngine {
         val context = sessionIndex.preceding(u.id, 4)
         if (!sessionIndex.beginAnalysis(session, u.id)) { reservation.close(); return }
         publishSessionSummary(session)
+        val queuedAt = SystemClock.elapsedRealtime()
         scope.launch(Dispatchers.IO) {
             try {
                 val request = com.oops.app.backend.TagRequest(session, u.toCandidate(), context.map { it.toCandidate() })
-                val result = policy.request(reservation) { client.tagUtterance(request) }
+                var httpStart = 0L
+                val result = policy.request(reservation) { httpStart = SystemClock.elapsedRealtime(); client.tagUtterance(request) }
+                val done = SystemClock.elapsedRealtime()
+                timing(session, u.id, "tag", "queue_ms" to (httpStart - queuedAt), "http_ms" to (done - httpStart),
+                    "since_final_ms" to (done - queuedAt), "tag" to result?.tag)
                 synchronized(pipeline) {
                     if (session != sessionId) return@synchronized
                     if (result == null) {
@@ -578,6 +705,7 @@ object OopsEngine {
                             emit(OopsEvent.UtteranceTagged(updated))
                             syncUtterance(session, updated)
                             checkConflict(session, updated)
+                            refreshOwnerHint(session, updated)
                         }
                     }
                 }
@@ -600,7 +728,13 @@ object OopsEngine {
         val hints = summary.commitments.associate { u ->
             val task = submitted.values.filter { it.request.sessionId == summary.sessionId && u.id in it.request.draft.evidence.utteranceIds }
                 .maxByOrNull { if (it.result.status == "created") 2 else if (it.result.status == "pending") 1 else 0 }
-            u.id to JSONObject().put("ownerHint", com.oops.app.backend.CommitmentRules.evidence(u.text, Settings.TEAM).owner ?: JSONObject.NULL)
+            val model = ownerHints[u.id]
+            u.id to JSONObject().put("ownerHint", task?.request?.draft?.who ?: model?.let { com.oops.app.backend.DraftPolicy.prefilledOwner(it) } ?: JSONObject.NULL)
+                .put("suggestedOwner", model?.suggestedOwner ?: model?.who ?: com.oops.app.backend.CommitmentRules.evidence(u.text, Settings.TEAM).owner ?: JSONObject.NULL)
+                .put("ownerConfidence", model?.ownerConfidence ?: JSONObject.NULL).put("tier", model?.tier ?: "C")
+                .put("reason", model?.reason ?: "负责人尚待核对")
+                .put("ownerCandidates", com.oops.app.backend.ApiJson.speakerCandidates(model?.ownerCandidates.orEmpty()))
+                .put("reviewStatus", if (task != null) "confirmed" else "unreviewed")
                 .put("whenRaw", com.oops.app.backend.CommitmentRules.deadline(u.text) ?: JSONObject.NULL)
                 .put("taskStatus", task?.result?.status ?: JSONObject.NULL).put("taskUrl", task?.result?.taskUrl ?: JSONObject.NULL)
         }
@@ -631,6 +765,9 @@ object OopsEngine {
             publishSpeakerMatch(session, u, null, "busy")
             return
         }
+        val queuedAt = SystemClock.elapsedRealtime()
+        var httpStart = 0L
+        var httpDone = 0L
         scope.launch(Dispatchers.IO) {
             runCatching { policy.request(reservation) {
                 // A queued job retains only text/id; PCM is copied only with an execution permit.
@@ -641,7 +778,9 @@ object OopsEngine {
                     ?: throw SpeakerAudioUnavailable()
                 val request = SpeakerRequest(session, u.id, pcm, u.text, u.startMs, u.words,
                     sessionIndex.preceding(u.id, 4).map { it.toCandidate() }, settings.speakerPreview, u.endMs)
+                httpStart = SystemClock.elapsedRealtime()
                 val result = client.identifySpeaker(request)
+                httpDone = SystemClock.elapsedRealtime()
                 if (settings.speakerPreview && result != null && result.preview == null) {
                     val preview = runCatching { previewApi.previewSpeakers(request) }.getOrNull()
                     result.copy(preview = preview)
@@ -650,9 +789,13 @@ object OopsEngine {
                 .onSuccess { result ->
                     publishSpeakerMatch(session, u, result, when {
                         result == null -> "unsupported"
-                        result.speaker != null || result.usableSegments(u).isNotEmpty() -> "matched"
+                        com.oops.app.backend.namedSpeaker(result.speaker) != null || result.usableSegments(u).any { it.speaker != null } -> "matched"
                         else -> "unconfirmed"
                     })
+                    timing(session, u.id, "speaker", "queue_ms" to (httpStart - queuedAt), "http_ms" to (httpDone - httpStart),
+                        "since_final_ms" to (SystemClock.elapsedRealtime() - queuedAt), "split_pending" to (result?.splitPending == true),
+                        "server" to JSONObject(result?.timingMs.orEmpty()))
+                    if (result?.splitPending == true) fetchSplit(session, u, queuedAt)
                 }
                 .onFailure { error ->
                     Log.w(TAG, "speaker id failed for ${u.id}: ${error.message}")
@@ -661,22 +804,150 @@ object OopsEngine {
         }.invokeOnCompletion { reservation.close() }
     }
 
+    /**
+     * The server answered the whole sentence first and computes the in-sentence split in the background.
+     * Poll for it (the server holds each request up to 8 s); it only ever adds suggestions to the line.
+     */
+    private fun fetchSplit(session: String, u: Utterance, finalAt: Long) {
+        val client = api
+        val policy = optionalRequests
+        scope.launch(Dispatchers.IO) {
+            try {
+                for (poll in 1..SPLIT_POLLS) {
+                    if (session != sessionId) return@launch
+                    val fetch = policy.request("speaker-split") { client.speakerSplit(session, u.id) } ?: return@launch
+                    if (fetch.status == "pending") continue
+                    val trial = if (fetch.status == "done") fetch.usableTrial(u) else emptyList()
+                    timing(session, u.id, "split", "status" to fetch.status, "polls" to poll, "parts" to trial.size,
+                        "since_final_ms" to (SystemClock.elapsedRealtime() - finalAt), "server" to JSONObject(fetch.timingMs))
+                    if (trial.isNotEmpty()) publishSplit(session, u, trial)
+                    return@launch
+                }
+                timing(session, u.id, "split", "status" to "gave_up", "since_final_ms" to (SystemClock.elapsedRealtime() - finalAt))
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                Log.w(TAG, "speaker split unavailable for ${u.id}: ${error.javaClass.simpleName}")
+            }
+        }
+    }
+
+    /** Adds the late split to a line without touching its whole-sentence label; never synced, drafted or an owner. */
+    private fun publishSplit(session: String, u: Utterance, trial: List<com.oops.app.buffer.SpeakerSegment>) {
+        synchronized(pipeline) {
+            if (session != sessionId) return
+            val current = sessionIndex.get(u.id) ?: return
+            if (current.segments.isNotEmpty()) return // validated segments always win over suggestions
+            sessionIndex.setTrial(session, u.id, trial)
+            transcript.setTrial(u.id, trial)?.let { line ->
+                emit(OopsEvent.SpeakerIdentified(line.id, line.speaker, line.speakerScore, line.segments,
+                    line.speakerState ?: "unconfirmed", line.speakerPreview, line.speakerCandidates, trial))
+            }
+        }
+    }
+
+    /** One JSON line per stage and sentence (logcat and the archived `timing.jsonl`): where the time goes after speech. */
+    private fun timing(session: String, id: String, stage: String, vararg fields: Pair<String, Any?>) {
+        val line = JSONObject().put("id", id).put("stage", stage).put("at", System.currentTimeMillis())
+        fields.forEach { (key, value) -> line.put(key, value ?: JSONObject.NULL) }
+        Log.i(TAG, "timing $line")
+        recorder?.takeIf { it.sessionId == session }?.let { r -> runCatching { r.timing(line) } }
+    }
+
     private class SpeakerAudioUnavailable : IllegalStateException("声纹音频已过期或尚未完整到达")
 
     private fun publishSpeakerMatch(session: String, u: Utterance, result: com.oops.app.backend.SpeakerResult?, status: String) {
         synchronized(pipeline) {
             if (session != sessionId) return
-            val name = result?.speaker ?: u.speaker
+            val name = com.oops.app.backend.namedSpeaker(result?.speaker)
             val segments = result?.usableSegments(u).orEmpty()
             val score = result?.score?.takeIf { it.isFinite() }
             val preview = if (settings.speakerPreview) result?.preview?.forUtterance(u, Settings.TEAM.toSet()) else null
-            sessionIndex.setSpeaker(session, u.id, name, segments, status, score, preview)?.let { syncUtterance(session, it) }
-            transcript.setSpeaker(u.id, name, segments, status, score, preview)?.let {
-                Log.i(TAG, "speaker ${u.id}: $status name=$name score=$score")
-                emit(OopsEvent.SpeakerIdentified(u.id, name, score, segments, status, preview))
+            val hints = if (name != null) emptyList() else result?.candidates.orEmpty()
+                .filter { com.oops.app.backend.namedSpeaker(it.name) != null && it.score.isFinite() }.take(2)
+            val trial = if (segments.isEmpty()) result?.usableTrial(u).orEmpty() else emptyList()
+            sessionIndex.setSpeaker(session, u.id, name, segments, status, score, preview, hints, trial)?.let {
+                syncUtterance(session, it)
+                refreshOwnerHint(session, it)
+            }
+            transcript.setSpeaker(u.id, name, segments, status, score, preview, hints, trial)?.let {
+                Log.i(TAG, "speaker ${u.id}: $status name=$name score=$score hint=${hints.joinToString { "${it.name}:${it.score}" }}" +
+                    " trial=${trial.joinToString("|") { "${if (it.overlap) "多人" else it.speaker ?: "?"}:${it.text.length}" }}")
+                emit(OopsEvent.SpeakerIdentified(u.id, name, score, segments, status, preview, hints, trial))
             }
         }
         publishSessionSummary(session)
+        refreshDraftSuggestions(session, u.id)
+    }
+
+    private fun refreshOwnerHint(session: String, utterance: Utterance) {
+        if (utterance.tag != "commitment") return
+        val epoch = hintEpochs.merge(utterance.id, 1L, Long::plus)!!
+        val client = api
+        val policy = optionalRequests
+        val reservation = policy.tryReserve("owner-hint") ?: return
+        scope.launch {
+            try {
+                val hintStart = SystemClock.elapsedRealtime()
+                val result = policy.request(reservation) { client.draftAction(DraftRequest(session,
+                    listOf(utterance.toCandidate()), sessionIndex.preceding(utterance.id, 4).map { it.toCandidate() })) }
+                timing(session, utterance.id, "draft", "http_ms" to (SystemClock.elapsedRealtime() - hintStart))
+                if (result != null && session == sessionId && hintEpochs[utterance.id] == epoch) {
+                    ownerHints[utterance.id] = result
+                    publishSessionSummary(session)
+                }
+            } catch (error: CancellationException) { throw error }
+            catch (error: Exception) { Log.w(TAG, "owner hint unavailable: ${error.javaClass.simpleName}") }
+        }.invokeOnCompletion { reservation.close() }
+    }
+
+    private fun refreshDraftSuggestions(session: String, utteranceId: String) {
+        drafts.values.filter { utteranceId in it.evidence.utteranceIds && !submitted.containsKey(it.draftId) }.forEach { draft ->
+            val revision = suggestionEpochs.merge(draft.draftId, draft.modelRevision + 1) { a, b -> maxOf(a + 1, b) }!!
+            val client = api
+            val policy = optionalRequests
+            val reservation = policy.tryReserve("draft-suggestion") ?: return@forEach
+            scope.launch {
+                try {
+                    val chosen = draft.evidence.utteranceIds.mapNotNull(sessionIndex::get)
+                    if (chosen.size != draft.evidence.utteranceIds.size) return@launch
+                    val result = policy.request(reservation) { client.draftAction(DraftRequest(session,
+                        chosen.map { it.toCandidate() }, sessionIndex.neighbors(draft.evidence.utteranceIds, 4, 1)
+                            .filter { it.id !in draft.evidence.utteranceIds }.map { it.toCandidate() })) }
+                    synchronized(pipeline) {
+                        if (result == null || session != sessionId || submitted.containsKey(draft.draftId) ||
+                            suggestionEpochs[draft.draftId] != revision || "confirm:${draft.draftId}" in inFlight) return@synchronized
+                        drafts.computeIfPresent(draft.draftId) { _, current ->
+                            com.oops.app.backend.DraftPolicy.updateModel(current, result, revision).also {
+                                emit(OopsEvent.Json("action.suggestion", com.oops.app.bridge.BridgeJson.draft(it)))
+                            }
+                        }
+                    }
+                } catch (error: CancellationException) { throw error }
+                catch (error: Exception) { Log.w(TAG, "draft suggestion unavailable: ${error.javaClass.simpleName}") }
+            }.invokeOnCompletion { reservation.close() }
+        }
+    }
+
+    /** The backoff (up to 15 s) is for a dead network; once a network is back, reconnect at once. */
+    private fun watchNetwork() {
+        val manager = app.getSystemService(android.net.ConnectivityManager::class.java) ?: return
+        runCatching {
+            manager.registerDefaultNetworkCallback(object : android.net.ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: android.net.Network) = reconnectAsrNow()
+            })
+        }.onFailure { Log.w(TAG, "network watch unavailable: ${it.javaClass.simpleName}") }
+    }
+
+    private fun reconnectAsrNow() {
+        synchronized(pipeline) {
+            // A live or connecting client exists while `asr` is set; it is null only during the backoff wait.
+            if (source == null || asr != null || _state.value.asr == "error") return
+            reconnectJob?.cancel()
+            reconnectAttempt = 0
+            Log.i(TAG, "network available, reconnecting ASR now")
+            openAsrLocked()
+        }
     }
 
     private fun onAsrClosed(generation: Int, error: String?, fatal: Boolean) {
@@ -808,13 +1079,15 @@ object OopsEngine {
         emit(OopsEvent.Latency(recent.takeLast(10), sorted[sorted.size / 2]))
     }
 
-    fun playClip(key: String, startMs: Long, endMs: Long) {
-        val slice = evidenceAudio(startMs, endMs)
-        if (slice == null) {
-            emit(OopsEvent.Clip(key, "expired"))
-            return
+    /** Local audio first; with [session] given, a sentence no longer on the phone is fetched from the server's archive. */
+    fun playClip(key: String, startMs: Long, endMs: Long, session: String? = null) {
+        // Another meeting's timestamps would point into this meeting's audio: only this meeting may play locally.
+        val slice = if (session == null || session == sessionId) evidenceAudio(startMs, endMs) else null
+        when {
+            slice != null -> player.play(key, slice)
+            session != null -> playRemoteClip(key, session, startMs, endMs)
+            else -> emit(OopsEvent.Clip(key, "expired"))
         }
-        player.play(key, slice)
     }
 
     private fun evidenceAudio(startMs: Long, endMs: Long): ByteArray? {
@@ -890,7 +1163,7 @@ object OopsEngine {
                     return@launch
                 }
                 val chosenIds = chosen.map { it.id }.toSet()
-                val context = (pool + sessionIndex.neighbors(chosenIds, before = 4, after = 1))
+                val context = (pool + sessionIndex.neighbors(chosenIds, before = 8, after = 1))
                     .distinctBy { it.id }
                     .filter { it.id !in chosenIds }
                     .sortedBy { it.startMs }
@@ -900,7 +1173,7 @@ object OopsEngine {
                 val draft = ActionDraft(
                     draftId = "d" + UUID.randomUUID().toString().take(8),
                     cardId = cardId,
-                    who = response.who.orEmpty(),
+                    who = com.oops.app.backend.DraftPolicy.prefilledOwner(response).orEmpty(),
                     what = response.what,
                     whenIso = response.whenIso,
                     whenRaw = response.whenRaw,
@@ -912,10 +1185,16 @@ object OopsEngine {
                         clipStartMs = chosen.first().startMs,
                         clipEndMs = chosen.last().endMs,
                     ),
+                    suggestedOwner = response.suggestedOwner ?: response.who,
+                    ownerSource = response.ownerSource, ownerConfidence = response.ownerConfidence,
+                    tier = response.tier, reason = response.reason, ownerCandidates = response.ownerCandidates,
+                    modelRevision = 1, context = response.context,
                 )
                 drafts[draft.draftId] = draft
                 Log.i(TAG, "draft ${draft.draftId}: who=${draft.who} what=${draft.what} when=${draft.whenIso}")
                 emit(OopsEvent.DraftReady(draft))
+                // A speaker answer may have arrived while this extraction request was in flight.
+                chosen.filter { sessionIndex.get(it.id)?.segments != it.segments }.forEach { refreshDraftSuggestions(sessionId, it.id) }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -927,6 +1206,21 @@ object OopsEngine {
     }
 
     /** Only a confirmed draft is written to Feishu. Retries reuse the draft's op_id. */
+    fun recordOwnerFeedback(payload: JSONObject) {
+        val draft = drafts[payload.optString("draftId")] ?: return
+        if (submitted.containsKey(draft.draftId)) return
+        val session = sessionId
+        val selected = payload.optString("selectedOwner").ifBlank { null }
+        val previous = payload.optString("previousOwner").ifBlank { null }
+        val suggestion = payload.optString("modelSuggestion").ifBlank { null }
+        val tier = payload.optString("modelTier", "C").takeIf { it in setOf("A", "B", "C") } ?: "C"
+        val confidence = if (payload.isNull("modelConfidence")) null else payload.optDouble("modelConfidence")
+            .takeIf { it.isFinite() && it in 0.0..1.0 }
+        val revision = payload.optLong("modelRevision", draft.modelRevision)
+        ownerFeedbackJobs.trySend { ownerFeedback.record(session, draft.draftId, draft.evidence.utteranceIds,
+            previous, selected, suggestion, tier, confidence, revision); Unit }
+    }
+
     fun confirmAction(
         draftId: String,
         who: String,
@@ -934,16 +1228,14 @@ object OopsEngine {
         whenIso: String?,
         whenRaw: String?,
         constraint: String?,
+        ownerSelectionSource: String = "user",
     ) {
         val base = drafts[draftId] ?: return fail("action", "这份草稿已失效")
         if (who.isBlank() || what.isBlank()) return fail("action", "请先填写负责人和事项")
         if (!inFlight.add("confirm:$draftId")) return // 防连点
         val existing = submitted[draftId]
         val opId = opIds.getOrPut(draftId) { UUID.randomUUID().toString() }
-        val draft = existing?.request?.draft ?: base.copy(
-            who = who.trim(), what = what.trim(), whenIso = whenIso?.ifBlank { null },
-            whenRaw = whenRaw?.ifBlank { null }, constraint = constraint?.ifBlank { null },
-        )
+        val draft = existing?.request?.draft ?: com.oops.app.backend.DraftPolicy.confirm(base, who, what, whenIso, whenRaw, constraint, ownerSelectionSource)
         val operation = existing ?: ActionOperationStore.Operation(
             ConfirmRequest(opId, sessionId, draft), settings.backendBaseUrl, api.name == "mock",
             ActionResult(opId, ActionResult.PENDING, mock = api.name == "mock"),
@@ -955,6 +1247,7 @@ object OopsEngine {
         }
         submitted[draftId] = operation
         drafts[draftId] = draft
+        ownerFeedbackJobs.trySend { ownerFeedback.confirm(operation.request.sessionId, draftId, operation.request.draft.who) }
         runAction(operation, submit = ActionWorkflow.shouldSubmit(existing?.result))
     }
 
@@ -1188,6 +1481,7 @@ object OopsEngine {
         val q = syncContext?.queue
         _state.update { it.copy(agenda = tracker.state(nowMs), notices = tracker.list().map { n -> n.bridge() },
             voiceTrigger = settings.voiceTrigger, noticeVibrate = settings.noticeVibrate, memorySync = settings.memorySync,
+            selfName = settings.selfName,
             syncPending = q?.pendingCount() ?: 0,
             syncStatus = when { !settings.memorySync -> "off"; q == null -> "idle"; q.unsupported -> "unsupported"; q.failed -> "failed";
                 q.pendingCount() > 0 -> if (it.syncStatus == "retrying") "retrying" else "pending"; else -> "synced" }) }
@@ -1234,14 +1528,16 @@ object OopsEngine {
                         } catch (error: CancellationException) { throw error }
                         catch (error: Exception) {
                             ctx.queue.complete(batch, SystemClock.elapsedRealtime(), false)
-                            if (error is com.oops.app.backend.HttpFailure && error.status in setOf(400, 409, 410, 413)) ctx.queue.halt()
+                            // A refused batch stops the sentences; a refused end (or a deleted meeting) stops everything.
+                            if (error is com.oops.app.backend.HttpFailure && error.status in setOf(400, 409, 410, 413))
+                                ctx.queue.halt(endToo = ctx.queue.failed || error.status == 410)
                             if (syncContext === ctx) _state.update { it.copy(syncStatus = "retrying") }
                             Log.w(TAG, "meeting sync failed: ${error.javaClass.simpleName}")
                         }
                     }
                 }
                 if (syncContext === ctx) updateAssistanceState()
-                if (ctx.queue.unsupported || ctx.queue.failed || ctx.stopped && ctx.queue.pendingCount() == 0) break
+                if (ctx.queue.finished() || ctx.stopped && ctx.queue.pendingCount() == 0) break
                 delay(1_000)
             }
             if (ctx.stopped && ctx.queue.pendingCount() == 0) syncContexts.remove(ctx)
@@ -1376,8 +1672,16 @@ object OopsEngine {
                 if (prior == null && !otherId.startsWith("h:")) return@launch
                 if (!conflictPairs.add("${u.id}:$otherId")) return@launch
                 val priorText = prior?.text ?: h.getString("text")
-                val prefix = if (prior == null) "${java.time.Instant.parse(h.getString("started_at")).atZone(java.time.ZoneId.systemDefault()).format(java.time.format.DateTimeFormatter.ofPattern("MM/dd"))} 会议" else "${(prior.startMs / 60000)} 分钟"
-                publishNotice(t.add(com.oops.app.notice.Notice(kind = "conflict", title = "可能与之前的约束冲突",
+                val confirmed = prior == null && h.optBoolean("confirmed")
+                val day = if (prior == null) java.time.Instant.parse(h.getString("started_at")).atZone(java.time.ZoneId.systemDefault())
+                    .format(java.time.format.DateTimeFormatter.ofPattern("MM/dd")) else ""
+                val meeting = h.optString("meeting_title").takeIf { prior == null && it.isNotBlank() && it != "null" }
+                val prefix = when {
+                    prior != null -> "${(prior.startMs / 60000)} 分钟"
+                    else -> "$day ${meeting?.let { "《$it》" } ?: "会议"}${if (confirmed) "已确认" else "（未核对）"}"
+                }
+                publishNotice(t.add(com.oops.app.notice.Notice(kind = "conflict",
+                    title = if (confirmed) "可能与已确认的决定冲突" else "可能与之前的约束冲突",
                     detail = "$prefix：「$priorText」\n本场：「${u.text}」", atMs = nowMs,
                     evidenceIds = listOf(u.id, otherId), history = if (prior == null) h else null)), session)
             } catch (error: CancellationException) { throw error }
@@ -1396,7 +1700,7 @@ object OopsEngine {
                         require(confirm) { "请确认删除会议文字" }
                         require(value != sessionId || !_state.value.capturing) { "请先停止收音，再删除本场文字" }
                         val result = client.historyDelete(value)
-                        if (result != null) syncContexts.filter { it.queue.sessionId == value }.forEach { it.queue.halt(); it.job?.cancel() }
+                        if (result != null) syncContexts.filter { it.queue.sessionId == value }.forEach { it.queue.halt(endToo = true); it.job?.cancel() }
                         result
                     }
                     "search" -> { require(value.isNotBlank() && value.length <= 500); client.historySearch(value) }
@@ -1406,6 +1710,158 @@ object OopsEngine {
                 else emit(OopsEvent.Json("history.$action", result.put("query", if (action == "search") value else "")))
             } catch (error: CancellationException) { throw error }
             catch (error: Exception) { fail("history", "往期会议请求失败：${error.message}") }
+        }
+    }
+
+    // ---- people's corrections, archived audio, tasks -----------------------------------------
+
+    /**
+     * A person says who spoke a sentence (a team name, other/multi/unclear, or null to undo). In the live meeting the
+     * line changes at once and the server is told once it holds the meeting text; a past meeting goes straight to the server.
+     */
+    fun correctSpeaker(session: String, utteranceId: String, speaker: String?) {
+        require(speaker == null || speaker in Settings.TEAM || speaker in MANUAL_OTHER) { "说话人无效" }
+        val live = synchronized(pipeline) {
+            if (session != sessionId) return@synchronized null
+            sessionIndex.setManual(session, utteranceId, speaker)?.also { transcript.setManual(utteranceId, speaker) }
+        }
+        if (live != null) {
+            emit(OopsEvent.Json("speaker.corrected", corrected(session, utteranceId, speaker, "local")))
+            publishSessionSummary(session)
+            if (!settings.memorySync) {
+                emit(OopsEvent.Toast("会议文字同步已关闭，只改了本机显示"))
+                return
+            }
+        }
+        val client = api
+        scope.launch {
+            val body = JSONObject().put("session_id", session).put("utterance_id", utteranceId)
+                .put("speaker", speaker ?: JSONObject.NULL).put("by", settings.selfName.ifEmpty { JSONObject.NULL })
+            try {
+                // The live meeting may not have reached the server yet: the sync queue sends every 20 s.
+                var result = client.reviewMeeting(body)
+                var tries = 0
+                while (result == null && live != null && tries++ < REVIEW_RETRIES) {
+                    delay(REVIEW_RETRY_MS)
+                    result = client.reviewMeeting(body)
+                }
+                if (result == null) {
+                    fail("review", if (live != null) "服务器还没有这场会议的文字，改动只在本机" else "当前后端不支持修改说话人")
+                    return@launch
+                }
+                emit(OopsEvent.Json("speaker.corrected", corrected(session, utteranceId, speaker, "saved")))
+                if (live != null) synchronized(pipeline) {
+                    // The server now drafts with the corrected speaker; ask again for this sentence's owner.
+                    sessionIndex.get(utteranceId)?.let { refreshOwnerHint(session, it) }
+                    refreshDraftSuggestions(session, utteranceId)
+                }
+            } catch (error: CancellationException) { throw error }
+            catch (error: Exception) { fail("review", "说话人修改没有保存到服务器：${error.message}") }
+        }
+    }
+
+    /** After-meeting check of one sentence: verdict (confirmed/rejected) and owner; null clears that field. */
+    fun review(session: String, utteranceId: String, fields: JSONObject) {
+        val body = JSONObject().put("session_id", session).put("utterance_id", utteranceId)
+            .put("by", settings.selfName.ifEmpty { JSONObject.NULL })
+        for (key in fields.keys()) {
+            val value = if (fields.isNull(key)) null else fields.getString(key)
+            require(when (key) {
+                "verdict" -> value == null || value in setOf("confirmed", "rejected")
+                "owner" -> value == null || value in Settings.TEAM
+                else -> false
+            }) { "核对内容无效" }
+            body.put(key, value ?: JSONObject.NULL)
+        }
+        require(body.has("verdict") || body.has("owner")) { "没有要保存的核对" }
+        val client = api
+        scope.launch {
+            try {
+                val result = client.reviewMeeting(body)
+                if (result == null) fail("review", "服务器上没有这场会议，核对没有保存")
+                else emit(OopsEvent.Json("review.saved", JSONObject().put("sessionId", session).put("utteranceId", utteranceId)
+                    .put("review", result.opt("review") ?: JSONObject.NULL)))
+            } catch (error: CancellationException) { throw error }
+            catch (error: Exception) { fail("review", "核对没有保存到服务器：${error.message}") }
+        }
+    }
+
+    private fun corrected(session: String, id: String, speaker: String?, status: String) = JSONObject()
+        .put("sessionId", session).put("utteranceId", id).put("speaker", speaker ?: JSONObject.NULL).put("status", status)
+
+    fun projects(name: String? = null) {
+        val client = api
+        scope.launch {
+            try {
+                val result = if (name == null) client.projects() else client.project(name)
+                if (result == null) fail("projects", "当前后端不支持项目")
+                else emit(OopsEvent.Json(if (name == null) "projects.list" else "project.open", result))
+            } catch (error: CancellationException) { throw error }
+            catch (error: Exception) { fail("projects", "项目请求失败：${error.message}") }
+        }
+    }
+
+    /** Puts a meeting in a project; this meeting's text may still be on its way to the server, so a live one retries. */
+    fun setMeetingProject(session: String, project: String) {
+        val name = project.trim()
+        require(name.length <= 30) { "项目名称最多 30 个字" }
+        val live = session == sessionId
+        val client = api
+        scope.launch {
+            try {
+                var result = client.setMeetingProject(session, name)
+                var tries = 0
+                while (result == null && live && tries++ < REVIEW_RETRIES) {
+                    delay(REVIEW_RETRY_MS)
+                    result = client.setMeetingProject(session, name)
+                }
+                if (result == null) fail("projects", if (live) "服务器还没有这场会议的文字，稍后再设项目" else "当前后端不支持项目")
+                else emit(OopsEvent.Json("meeting.project", result))
+            } catch (error: CancellationException) { throw error }
+            catch (error: Exception) { fail("projects", "项目没有保存：${error.message}") }
+        }
+    }
+
+    fun renameMeeting(session: String, title: String) {
+        require(title.trim().length <= 40) { "会议名称最多 40 个字" }
+        val client = api
+        scope.launch {
+            try {
+                val result = client.renameMeeting(session, title.trim())
+                if (result == null) fail("history", "当前后端不支持改会议名称")
+                else emit(OopsEvent.Json("history.renamed", result))
+            } catch (error: CancellationException) { throw error }
+            catch (error: Exception) { fail("history", "改名没有保存：${error.message}") }
+        }
+    }
+
+    /** Plays a sentence from the server's archive (a past meeting, or this one once its recording is uploaded). */
+    fun playRemoteClip(key: String, session: String, startMs: Long, endMs: Long) {
+        val client = api
+        scope.launch {
+            try {
+                emit(OopsEvent.Clip(key, "loading"))
+                val pcm = client.recordingClip(session, startMs, endMs)
+                if (pcm == null || pcm.isEmpty()) emit(OopsEvent.Clip(key, "unavailable")) else player.play(key, pcm)
+            } catch (error: CancellationException) { throw error }
+            catch (error: Exception) {
+                emit(OopsEvent.Clip(key, "unavailable"))
+                fail("clip", "原声取不到：${error.message}")
+            }
+        }
+    }
+
+    fun tasks(mine: Boolean, status: String) {
+        val client = api
+        scope.launch {
+            try {
+                val self = settings.selfName.ifEmpty { null }
+                require(!mine || self != null) { "请先在设置里选择本人" }
+                val result = client.tasks(if (mine) self else null, status)
+                if (result == null) fail("tasks", "当前后端不支持任务列表")
+                else emit(OopsEvent.Json("tasks.list", result.put("mine", mine).put("status", status)))
+            } catch (error: CancellationException) { throw error }
+            catch (error: Exception) { fail("tasks", "任务列表请求失败：${error.message}") }
         }
     }
 
@@ -1437,6 +1893,11 @@ object OopsEngine {
         }
         if (json.has("backendBaseUrl")) settings.backendBaseUrl = json.getString("backendBaseUrl")
         if (json.has("backendToken")) settings.backendToken = json.getString("backendToken")
+        if (json.has("selfName")) {
+            val name = json.getString("selfName")
+            require(name.isEmpty() || name in Settings.TEAM) { "本人必须是团队成员" }
+            settings.selfName = name
+        }
         if (json.has("mockBackend")) settings.mockBackend = json.getBoolean("mockBackend")
         val url = settings.backendBaseUrl
         if (!settings.mockBackend && !(url.startsWith("http://") || url.startsWith("https://"))) {
@@ -1446,6 +1907,7 @@ object OopsEngine {
         val speakerChanged = json.has("speakerInfo") && json.getBoolean("speakerInfo") != settings.speakerInfo
         if (json.has("speakerInfo")) settings.speakerInfo = json.getBoolean("speakerInfo")
         if (json.has("speakerPreview")) settings.speakerPreview = json.getBoolean("speakerPreview")
+        if (json.has("recordSession")) settings.recordSession = json.getBoolean("recordSession")
         if (com.oops.app.BuildConfig.DEBUG && json.has("speakerPreviewUrl")) {
             val value = json.getString("speakerPreviewUrl").trim()
             require(value.isEmpty() || value.toUri().host in setOf("127.0.0.1", "localhost") && value.startsWith("http://")) {
@@ -1487,6 +1949,7 @@ object OopsEngine {
                 hasBackendToken = settings.backendToken.isNotBlank(),
                 speakerInfo = settings.speakerInfo,
                 speakerPreviewEnabled = settings.speakerPreview,
+                recordSession = settings.recordSession,
                 source = if (it.capturing) it.source else settings.source,
                 remoteAddress = settings.remoteAddress,
             )

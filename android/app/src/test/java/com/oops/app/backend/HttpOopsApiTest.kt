@@ -70,6 +70,39 @@ class HttpOopsApiTest {
         assertTrue(runCatching { api.getAction("op-1") }.exceptionOrNull() is IllegalArgumentException)
     }
 
+    @Test fun reviewClipAndTasksUseTheirEndpoints() = runTest {
+        val seen = mutableListOf<String>()
+        val pcm = ByteArray(3200) { it.toByte() }
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        server.createContext("/") { exchange ->
+            seen.add(exchange.requestMethod + " " + exchange.requestURI.rawPath + (exchange.requestURI.rawQuery?.let { "?$it" } ?: ""))
+            val path = exchange.requestURI.path
+            val (code, bytes) = when {
+                path.endsWith("/clip") && exchange.requestURI.rawQuery.contains("start_ms=0") -> 200 to (com.oops.app.core.Wav.header(pcm.size) + pcm)
+                path.endsWith("/clip") && exchange.requestURI.rawQuery.contains("start_ms=5000") -> 409 to """{"error":{"code":"RECORDING","message":"录音还没有上传到这一段"}}""".toByteArray()
+                path.endsWith("/clip") -> 404 to "{}".toByteArray()
+                else -> 200 to """{"items":[]}""".toByteArray()
+            }
+            exchange.sendResponseHeaders(code, bytes.size.toLong())
+            exchange.responseBody.use { it.write(bytes) }
+        }
+        server.start()
+        try {
+            val api = HttpOopsApi(OkHttpClient(), "http://127.0.0.1:${server.address.port}")
+            assertArrayEquals(pcm, api.recordingClip("session-1", 0, 100))
+            assertNull(api.recordingClip("session-1", 100, 200))
+            val failure = runCatching { api.recordingClip("session-1", 5000, 6000) }.exceptionOrNull()
+            assertEquals(409, (failure as HttpFailure).status)
+            api.tasks("洪玉麟", "open"); api.tasks(null, "all")
+            api.reviewMeeting(org.json.JSONObject().put("session_id", "s").put("utterance_id", "u1").put("speaker", "洪玉麟"))
+            assertEquals(listOf("GET /v1/recordings/session-1/clip?start_ms=0&end_ms=100",
+                "GET /v1/recordings/session-1/clip?start_ms=100&end_ms=200", "GET /v1/recordings/session-1/clip?start_ms=5000&end_ms=6000",
+                "GET /v1/tasks?status=open&assignee=%E6%B4%AA%E7%8E%89%E9%BA%9F", "GET /v1/tasks?status=all",
+                "POST /v1/meetings/review"), seen)
+            assertTrue(runCatching { api.tasks(null, "late") }.isFailure)
+            assertTrue(runCatching { api.recordingClip("../x", 0, 100) }.isFailure)
+        } finally { server.stop(0) }
+    }
     private suspend fun withServer(code: Int, body: String, block: suspend (HttpOopsApi) -> Unit) {
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
         server.createContext("/") { exchange ->

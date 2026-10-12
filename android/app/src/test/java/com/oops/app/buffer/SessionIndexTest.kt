@@ -1,5 +1,6 @@
 package com.oops.app.buffer
 
+import com.oops.app.backend.toCandidate
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -15,6 +16,31 @@ class SessionIndexTest {
         assertTrue(index.hasAudio("u1"))
         index.setTag("s", "u1", "idea", .9, "jev")
         assertFalse(index.hasAudio("u1")); assertTrue(index.summary().grouped["constraint"]!!.isEmpty())
+    }
+    @Test fun lateTagKeepsTrialSplitButDraftsNeverSeeIt() {
+        val index = SessionIndex(); index.reset("s")
+        index.add("s", Utterance("u1", 0, 2000, "我来。好的。", null))
+        val trial = listOf(SpeakerSegment(0, 1000, "我来。", "林春源", .6, "voiceprint", false, tier = "B"),
+            SpeakerSegment(1000, 2000, "好的。", "洪玉麟", .6, "voiceprint", false, tier = "B"))
+        index.setSpeaker("s", "u1", "林春源", trialSegments = trial)
+        val tagged = requireNotNull(index.setTag("s", "u1", "commitment", .9, "jev"))
+        assertEquals(trial, tagged.trialSegments)
+        assertTrue(tagged.toCandidate().segments.isEmpty())
+    }
+    @Test fun manualSpeakerSurvivesLateModelResultsAndIsNeverSentAsTheModelSpeaker() {
+        val index = SessionIndex(); index.reset("s")
+        index.add("s", Utterance("u1", 0, 2000, "我来做。", null))
+        assertNull(index.setManual("other", "u1", "洪玉麟"))
+        index.setManual("s", "u1", "洪玉麟")
+        index.setSpeaker("s", "u1", "林春源", speakerState = "matched")
+        val tagged = requireNotNull(index.setTag("s", "u1", "commitment", .9, "jev"))
+        assertEquals("洪玉麟", tagged.manualSpeaker)
+        assertEquals("林春源", tagged.toCandidate().speaker) // the server keeps corrections apart from the model's answer
+        assertNull(index.setManual("s", "u1", null)!!.manualSpeaker)
+        val buffer = TranscriptBuffer(300_000)
+        val line = buffer.add(0, 1000, "好的", null)
+        buffer.setManual(line.id, "multi")
+        assertEquals("multi", buffer.setSpeaker(line.id, "林春源")!!.manualSpeaker)
     }
     @Test fun chronologicalIndexHandlesLateResultsUpdatesAndEviction() {
         val index = SessionIndex(maxUtterances = 4)

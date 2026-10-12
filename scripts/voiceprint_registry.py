@@ -19,6 +19,13 @@ def audio_quality(pcm):
             "clipped_ratio": round(sum(abs(v) >= .998 for v in values) / max(1, len(values)), 4)}
 
 
+def person_profiles(person):
+    """One voiceprint per capture source (phone mic, remote bridge, DJI...). Old records hold a single top-level vector."""
+    if person.get("profiles"):
+        return person["profiles"]
+    return {person.get("source") or "DJI 历史录音": person}
+
+
 class VoiceprintRegistry:
     def __init__(self, path, seed_path, team):
         self.path, self.team = path, team
@@ -43,6 +50,8 @@ class VoiceprintRegistry:
                 rows.append({"name": name, "registered": p is not None,
                     "seconds": p.get("seconds", 0) if p else 0,
                     "source": p.get("source", "DJI 历史录音") if p else None,
+                    "sources": [{"source": k, "seconds": v.get("seconds", 0), "updated_at": v.get("updated_at")}
+                                for k, v in person_profiles(p).items()] if p else [],
                     "updated_at": p.get("updated_at") if p else None,
                     "sample_id": p.get("sample_id") if p else None,
                     "profile_revision": self.profile_revision(name)})
@@ -64,7 +73,7 @@ class VoiceprintRegistry:
             if name not in self.team:
                 raise ValueError("请选择组织中的成员")
             old = self.data["people"].get(name, {})
-            if old.get("sample_id") == sample_id:
+            if old and any(v.get("sample_id") == sample_id for v in person_profiles(old).values()):
                 return self.catalog()  # same frozen recording after a lost response
             current = self.profile_revision(name) if expected_profile_revision is not None else self.revision()
             expected = expected_profile_revision if expected_profile_revision is not None else expected_revision
@@ -74,9 +83,12 @@ class VoiceprintRegistry:
             if len(vector) != self.dimension or not all(math.isfinite(x) for x in vector) or norm < 1e-8:
                 raise ValueError("声纹特征无效，请重新录音")
             data = copy.deepcopy(self.data)
-            data["people"][name] = {"vector": [x / norm for x in vector], "seconds": quality["seconds"],
+            entry = {"vector": [x / norm for x in vector], "seconds": quality["seconds"],
                 "source": source, "sample_id": sample_id,
                 "updated_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")}
+            profiles = {k: dict(v) for k, v in person_profiles(old).items()} if old else {}
+            profiles[source] = entry  # re-enrolling on the same source replaces it; other sources are kept
+            data["people"][name] = dict(entry, profiles=profiles)
             self._write(data)
             return self.catalog()
 

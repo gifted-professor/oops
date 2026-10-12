@@ -31,4 +31,29 @@ class MeetingSyncTest {
         assertEquals(0, next.batch(0)!!.body.getJSONArray("utterances").length())
         assertTrue(runCatching { next.complete(b, 0, true) }.isFailure)
     }
+    @Test fun endStillGoesOutAfterTheServerRefusedSentences() {
+        val q = queue(); q.upsert(u(1))
+        val refused = q.batch(0)!!; q.complete(refused, 0, false); q.halt()
+        assertNull(q.batch(999999, true))  // sentences are stopped for good
+        assertTrue(q.finished())  // nothing to send until the meeting stops, which restarts the worker
+        q.stop("2026-10-07T01:00:00Z")
+        val end = q.batch(0, true)!!  // no leftover backoff
+        assertEquals("2026-10-07T01:00:00Z", end.body.getString("ended_at"))
+        assertEquals(0, end.body.getJSONArray("utterances").length())
+        assertFalse(end.body.has("agenda"))  // the server keeps its own
+        assertTrue(q.endPending()); q.complete(end, 10, true)
+        assertFalse(q.endPending()); assertTrue(q.finished()); assertNull(q.batch(999999, true))
+    }
+    @Test fun aRefusedEndIsNotRetriedForever() {
+        val q = queue(); q.upsert(u(1)); q.halt(); q.stop("2026-10-07T01:00:00Z")
+        val end = q.batch(0, true)!!; q.complete(end, 0, false); q.halt(endToo = true)
+        assertTrue(q.finished()); assertNull(q.batch(999999, true))
+    }
+    @Test fun stopSkipsALeftoverBackoff() {
+        val q = queue(); q.upsert(u(1))
+        val b = q.batch(0)!!; repeat(6) { q.complete(b, 0, false) }
+        assertNull(q.batch(1000, true))
+        q.stop("2026-10-07T01:00:00Z")
+        assertNotNull(q.batch(1000, true))
+    }
 }

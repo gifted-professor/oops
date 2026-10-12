@@ -18,6 +18,10 @@ class Settings(context: Context) {
     var memorySync: Boolean
         get() = prefs.getBoolean("memory_sync", true)
         set(value) = prefs.edit { putBoolean("memory_sync", value) }
+    /** Who uses this phone (a team name, or empty): picks "my" tasks. */
+    var selfName: String
+        get() = prefs.getString("self_name", "").orEmpty()
+        set(value) = prefs.edit { putString("self_name", value) }
     var agendaJson: String
         get() = prefs.getString("agenda_json", "{}").orEmpty()
         set(value) = prefs.edit { putString("agenda_json", value) }
@@ -49,6 +53,11 @@ class Settings(context: Context) {
     var speakerPreview: Boolean
         get() = prefs.getBoolean("speaker_preview", false)
         set(value) = prefs.edit { putBoolean("speaker_preview", value) }
+
+    /** Keep each session's audio + finals in app storage for offline tuning (on unless turned off). */
+    var recordSession: Boolean
+        get() = prefs.getBoolean("record_session", true)
+        set(value) = prefs.edit { putBoolean("record_session", value) }
 
     /** Optional debug-only analysis service; business calls keep their normal backend. */
     var speakerPreviewUrl: String

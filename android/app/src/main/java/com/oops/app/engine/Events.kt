@@ -26,6 +26,13 @@ data class EngineState(
     val hasBackendToken: Boolean = false,
     val speakerInfo: Boolean = false,
     val speakerPreviewEnabled: Boolean = false,
+    val recordSession: Boolean = false,
+    val recordingsPending: Int = 0,
+    val recordingUpload: String = "idle",
+    /** The 3-hour audio cap was reached: text continues, audio no longer is recorded. */
+    val recordingCapped: Boolean = false,
+    /** Another app is holding the microphone (Android silences our input); the transcript has a hole. */
+    val micBusy: Boolean = false,
     val liveSpeakerStatus: String? = null,
     val liveSpeakers: List<String> = emptyList(),
     val liveOverlap: Boolean = false,
@@ -43,6 +50,7 @@ data class EngineState(
     val voiceTrigger: Boolean = true,
     val noticeVibrate: Boolean = true,
     val memorySync: Boolean = true,
+    val selfName: String = "",
     val syncStatus: String = "idle",
     val syncPending: Int = 0,
     val commitmentCount: Int = 0,
@@ -66,7 +74,9 @@ sealed interface OopsEvent {
     data class SpeakerIdentified(val utteranceId: String, val speaker: String?, val score: Double?,
         val segments: List<com.oops.app.buffer.SpeakerSegment> = emptyList(),
         val speakerState: String = if (speaker != null) "matched" else "unconfirmed",
-        val preview: com.oops.app.buffer.SpeakerPreview? = null) : OopsEvent
+        val preview: com.oops.app.buffer.SpeakerPreview? = null,
+        val candidates: List<com.oops.app.buffer.SpeakerCandidate> = emptyList(),
+        val trialSegments: List<com.oops.app.buffer.SpeakerSegment> = emptyList()) : OopsEvent
     data class UtteranceTagged(val utterance: Utterance) : OopsEvent
     data class SessionSummary(val sessionId: String, val commitments: List<Utterance>, val audioIds: Set<String>,
         val grouped: Map<String, List<Utterance>> = emptyMap(), val hints: Map<String, JSONObject> = emptyMap(), val notices: List<JSONObject> = emptyList()) : OopsEvent

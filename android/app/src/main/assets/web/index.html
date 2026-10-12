@@ -3,60 +3,34 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="color-scheme" content="light dark">
+  <meta name="color-scheme" content="light">
   <title>Oops</title>
+  <!-- proto.css is the design prototype's own stylesheet, used unchanged; app.css only adds what the prototype lacks. -->
+  <link rel="stylesheet" href="proto.css">
   <link rel="stylesheet" href="app.css">
 </head>
 <body>
-  <header class="topbar">
-    <div class="brand">
-      <span class="logo">Oops</span>
-      <span class="tagline">Never miss what mattered.</span>
-    </div>
-    <button class="icon-btn" id="btn-ask" aria-label="问答">问</button>
-    <button class="icon-btn" id="btn-settings" aria-label="调试设置">⚙︎</button>
-  </header>
-
-  <section class="status" aria-live="polite">
-    <div class="status-row">
-      <span class="pill" id="pill"><span class="dot"></span><span id="capture-text">未收音</span></span>
-      <span class="source" id="source-text"></span>
-      <div class="meter" aria-hidden="true"><div id="level"></div></div>
-    </div>
-    <div class="status-meta">
-      <span id="buffer-text">缓存 0:00 / 5:00</span>
-      <span class="asr" id="asr-text">识别未连接</span>
-    </div>
-    <div class="gap-banner" id="gap-banner" hidden></div>
-    <div class="speaker-preview-status" id="speaker-preview-status" hidden></div>
-    <button class="chip" id="btn-agenda">＋本场目标与议程</button>
-    <span class="fine" id="agenda-note"></span><div class="fine" id="sync-note"></div>
-    <button class="chip" id="btn-commitments" hidden></button><button class="chip ghost" id="btn-notices" hidden></button>
-  </section>
-
-  <main class="transcript" id="transcript">
-    <p class="section-title">最近 5 分钟 · 本场纪要保留至下一次收音</p>
-    <div class="empty" id="empty">
-      开始收音后，最近 5 分钟的对话会出现在这里。<br>
-      重要的话不用提前标记，事后点 <b>Oops</b> 就能找回原话。
-    </div>
-    <div class="pruned-note" id="pruned-note" hidden>更早的字幕已移出列表，本场纪要仍可查看</div>
-    <ol id="lines"></ol>
-    <div class="partial" id="partial"></div>
-  </main>
-
-  <footer class="dock">
-    <button class="dock-btn" id="btn-capture">开始收音</button>
-    <button class="oops-btn" id="btn-oops" aria-label="Oops，找回刚才那句"><span>Oops</span><small>找回刚才那句</small></button>
-    <button class="dock-btn" id="btn-saved">已保存 <b id="saved-count">0</b></button>
-  </footer>
-
-  <div class="backdrop" id="backdrop" hidden></div>
-  <section class="sheet" id="sheet" hidden aria-live="polite"></section>
-  <div id="notices" aria-live="polite"></div>
-  <div class="toast" id="toast" hidden></div>
+  <div class="oops-root" id="root" data-route="home">
+    <header class="app-header" id="hdr"></header>
+    <div class="session-fixed-tabs" id="tabs" hidden></div>
+    <section class="mobile-page oops-scroll" id="scroll">
+      <main class="screen-content" id="screen"></main>
+    </section>
+    <nav class="app-nav" id="nav" aria-label="主导航"></nav>
+    <aside class="recording-controls" id="rc" aria-label="当前记录控制" hidden></aside>
+    <div id="notices" aria-live="polite"></div>
+    <div class="sheet-overlay" id="backdrop" hidden></div>
+    <div class="bottom-sheet" id="sheet" role="dialog" hidden></div>
+    <div class="app-toast" id="toast" hidden></div>
+  </div>
+  <!-- The live transcript is appended to one sentence at a time; it lives here and is moved into the page that shows it. -->
+  <div id="holder" hidden>
+    <div id="lines"></div>
+    <p class="meta live-partial" id="partial"></p>
+  </div>
 
   <script src="bridge-mock.js"></script>
+  <script src="draft-state.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
